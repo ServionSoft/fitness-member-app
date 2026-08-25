@@ -1,5 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, Image, TouchableOpacity, TextInput, ActivityIndicator, FlatList, Modal, RefreshControl } from 'react-native';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Image,
+  TouchableOpacity,
+  TextInput,
+  ActivityIndicator,
+  FlatList,
+  Modal,
+  RefreshControl,
+  Platform,
+  InteractionManager,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { launchImageLibrary, launchCamera } from 'react-native-image-picker';
 import HeaderBar from '../components/HeaderBar';
@@ -14,6 +27,58 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { getProfileImageSource, ProfileImage } from '../utils/imageUtils';
 import { API_BASE_URL as ENV_API_BASE_URL } from '@env';
 import ModernAlert from '../components/ModernAlert';
+
+/** Keep community uploads small — full HEIC/12MP photos freeze real devices */
+const COMMUNITY_IMAGE_OPTIONS = {
+  mediaType: 'photo',
+  quality: 0.55,
+  maxWidth: 1280,
+  maxHeight: 1280,
+  includeBase64: false,
+  includeExtra: false,
+  selectionLimit: 1,
+  presentationStyle: 'fullScreen',
+  ...(Platform.OS === 'ios'
+    ? { assetRepresentationMode: 'compatible' } // force JPEG-compatible file on iOS
+    : {}),
+};
+
+const normalizePickedImage = (asset) => {
+  if (!asset?.uri) {
+    return null;
+  }
+
+  let uri = asset.uri;
+  // iOS FormData needs a file:// URI (picker usually returns one after resize)
+  if (Platform.OS === 'ios' && uri.startsWith('/') && !uri.startsWith('file://')) {
+    uri = `file://${uri}`;
+  }
+
+  if (uri.startsWith('ph://') || uri.startsWith('assets-library://')) {
+    return null;
+  }
+
+  let type = asset.type || 'image/jpeg';
+  if (type === 'image/heic' || type === 'image/heif' || type === 'public.heic') {
+    type = 'image/jpeg';
+  }
+
+  let fileName = asset.fileName || `post_${Date.now()}.jpg`;
+  fileName = fileName.split('?')[0];
+  if (/\.(heic|heif)$/i.test(fileName)) {
+    fileName = fileName.replace(/\.(heic|heif)$/i, '.jpg');
+  } else if (!/\.(jpe?g|png|gif|webp)$/i.test(fileName)) {
+    fileName = `${fileName.replace(/\.[^.]+$/, '') || 'post'}.jpg`;
+  }
+
+  return {
+    uri,
+    type,
+    fileName,
+    width: asset.width,
+    height: asset.height,
+  };
+};
 
 export default function PostsScreen() {
   const navigation = useNavigation();
@@ -32,6 +97,7 @@ export default function PostsScreen() {
   const [newComment, setNewComment] = useState('');
   const [inlineComments, setInlineComments] = useState({}); // Track inline comment text per post
   const [creatingPost, setCreatingPost] = useState(false);
+  const [pickingImage, setPickingImage] = useState(false);
   const [expandedComments, setExpandedComments] = useState(new Set()); // Track which posts have comments expanded
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertConfig, setAlertConfig] = useState({ title: '', message: '', type: 'info', buttons: [] });
@@ -72,13 +138,8 @@ export default function PostsScreen() {
         },
       });
       
-      console.log('Response Status:', response.status);
-      console.log('Response Headers:', response.headers);
-      
       if (response.ok) {
         const data = await response.json();
-        console.log('Response Data:', JSON.stringify(data, null, 2));
-        console.log('Response Data (object):', data);
         
         // Process the API response
         if (data.success && data.data && data.data.data) {
@@ -223,8 +284,8 @@ export default function PostsScreen() {
       const formData = new FormData();
       formData.append('content', newPostText.trim());
 
-      // Add image if selected
-      if (selectedImage) {
+      // Add image if selected (already compressed + JPEG-normalized for device uploads)
+      if (selectedImage?.uri) {
         formData.append('image', {
           uri: selectedImage.uri,
           type: selectedImage.type || 'image/jpeg',
@@ -568,36 +629,81 @@ export default function PostsScreen() {
   };
 
   const handleImagePicker = () => {
-    // Directly open gallery instead of showing modal
+    if (pickingImage || creatingPost) {
+      return;
+    }
     openImageLibrary();
   };
 
-  const openCamera = () => {
-    const options = {
-      mediaType: 'photo',
-      quality: 0.8,
-      maxWidth: 1000,
-      maxHeight: 1000,
-    };
+  const applyPickedAsset = (asset) => {
+    // Defer state update — picker resize callback can jank the JS thread on device
+    InteractionManager.runAfterInteractions(() => {
+      const normalized = normalizePickedImage(asset);
+      setPickingImage(false);
+      if (!normalized) {
+        setAlertConfig({
+          title: 'Error',
+          message: 'Could not use that photo. Please try another image.',
+          type: 'error',
+          buttons: [{ text: 'OK', onPress: () => {}, style: 'primary' }],
+        });
+        setAlertVisible(true);
+        return;
+      }
+      setSelectedImage(normalized);
+    });
+  };
 
-    launchCamera(options, (response) => {
-      if (response.assets && response.assets[0]) {
-        setSelectedImage(response.assets[0]);
+  const openCamera = () => {
+    if (pickingImage) {
+      return;
+    }
+    setPickingImage(true);
+    launchCamera(COMMUNITY_IMAGE_OPTIONS, (response) => {
+      if (response.didCancel || response.errorCode) {
+        setPickingImage(false);
+        if (response.errorMessage) {
+          setAlertConfig({
+            title: 'Error',
+            message: response.errorMessage,
+            type: 'error',
+            buttons: [{ text: 'OK', onPress: () => {}, style: 'primary' }],
+          });
+          setAlertVisible(true);
+        }
+        return;
+      }
+      if (response.assets?.[0]) {
+        applyPickedAsset(response.assets[0]);
+      } else {
+        setPickingImage(false);
       }
     });
   };
 
   const openImageLibrary = () => {
-    const options = {
-      mediaType: 'photo',
-      quality: 0.8,
-      maxWidth: 1000,
-      maxHeight: 1000,
-    };
-
-    launchImageLibrary(options, (response) => {
-      if (response.assets && response.assets[0]) {
-        setSelectedImage(response.assets[0]);
+    if (pickingImage) {
+      return;
+    }
+    setPickingImage(true);
+    launchImageLibrary(COMMUNITY_IMAGE_OPTIONS, (response) => {
+      if (response.didCancel || response.errorCode) {
+        setPickingImage(false);
+        if (response.errorMessage) {
+          setAlertConfig({
+            title: 'Error',
+            message: response.errorMessage,
+            type: 'error',
+            buttons: [{ text: 'OK', onPress: () => {}, style: 'primary' }],
+          });
+          setAlertVisible(true);
+        }
+        return;
+      }
+      if (response.assets?.[0]) {
+        applyPickedAsset(response.assets[0]);
+      } else {
+        setPickingImage(false);
       }
     });
   };
@@ -802,11 +908,18 @@ export default function PostsScreen() {
             />
             
             {/* Image Preview */}
+            {pickingImage && (
+              <View style={styles.imagePickingRow}>
+                <ActivityIndicator size="small" color="#222" />
+                <Text style={styles.imagePickingText}>Preparing photo…</Text>
+              </View>
+            )}
             {selectedImage && (
               <View style={styles.imagePreviewContainer}>
                 <Image 
                   source={{ uri: selectedImage.uri }} 
-                  style={styles.imagePreview} 
+                  style={styles.imagePreview}
+                  resizeMode="cover"
                 />
                 <TouchableOpacity 
                   style={styles.removeImageBtn}
@@ -820,8 +933,9 @@ export default function PostsScreen() {
             {/* Image Upload Options */}
             <View style={styles.imageUploadOptions}>
               <TouchableOpacity 
-                style={styles.imageUploadBtn}
+                style={[styles.imageUploadBtn, pickingImage && styles.imageUploadBtnDisabled]}
                 onPress={handleImagePicker}
+                disabled={pickingImage || creatingPost}
               >
                 <Ionicons name="image-outline" size={16} color="#007bff" />
                 <Text style={styles.imageUploadText}>Add Photo</Text>
@@ -1225,7 +1339,19 @@ const styles = StyleSheet.create({
     width: '100%',
     height: 200,
     borderRadius: 8,
-    resizeMode: 'cover',
+    backgroundColor: '#f0f0f0',
+  },
+  imagePickingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    marginBottom: 10,
+  },
+  imagePickingText: {
+    marginLeft: 8,
+    fontSize: 13,
+    color: '#666',
+    fontWeight: '500',
   },
   removeImageBtn: {
     position: 'absolute',
@@ -1244,6 +1370,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingVertical: 12,
+  },
+  imageUploadBtnDisabled: {
+    opacity: 0.5,
   },
   imageUploadText: {
     fontSize: 13,

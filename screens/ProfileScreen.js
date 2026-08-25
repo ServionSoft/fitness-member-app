@@ -20,7 +20,10 @@ const API_BASE_URL = ENV_API_BASE_URL;
 
 const { width: screenWidth } = Dimensions.get('window');
 
-const featureCards = [
+// Temporary: hide Membership + Invoices from Profile until billing is ready
+const HIDE_MEMBERSHIP_AND_INVOICES = true;
+
+const allFeatureCards = [
   { icon: 'users', label: 'Contact Us', lib: 'Feather', color: '#222', bg: '#fff' },
   { icon: 'calendar', label: 'Schedule', lib: 'Feather', color: '#222', bg: '#fff' },
   { icon: 'award', label: 'Membership', lib: 'Feather', color: '#222', bg: '#fff' },
@@ -28,6 +31,12 @@ const featureCards = [
   { icon: 'trending-up', label: 'Weekly Progress', lib: 'Feather', color: '#222', bg: '#fff' },
   { icon: 'note-text-outline', label: 'Notes', lib: 'MaterialCommunityIcons', color: '#222', bg: '#fff' },
 ];
+
+const featureCards = HIDE_MEMBERSHIP_AND_INVOICES
+  ? allFeatureCards.filter(
+      (card) => card.label !== 'Membership' && card.label !== 'Invoices',
+    )
+  : allFeatureCards;
 
 export default function ProfileScreen() {
   const [menuVisible, setMenuVisible] = useState(false);

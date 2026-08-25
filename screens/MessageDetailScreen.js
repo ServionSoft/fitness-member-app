@@ -76,41 +76,47 @@ export default function MessageDetailScreen() {
     }, [recipientId, recipientType])
   );
 
-  // Keyboard event handlers for Android
+  // Lift input above keyboard (iOS + Android)
   useEffect(() => {
-    if (Platform.OS === 'android') {
-      keyboardShowListener.current = Keyboard.addListener('keyboardDidShow', (e) => {
-        const { height } = e.endCoordinates;
-        setKeyboardHeightState(height);
-        Animated.timing(keyboardHeight, {
-          toValue: height,
-          duration: 250,
-          useNativeDriver: false, // We need to animate layout properties
-        }).start();
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
 
-        // Scroll to bottom when keyboard opens
-        setTimeout(() => {
-          flatListRef.current?.scrollToEnd({ animated: true });
-        }, 300);
-      });
+    keyboardShowListener.current = Keyboard.addListener(showEvent, (e) => {
+      const { height } = e.endCoordinates;
+      // Keyboard frame already covers the home-indicator area; avoid double-padding
+      const offset =
+        Platform.OS === 'ios' ? Math.max(0, height - insets.bottom) : height;
+      const duration =
+        Platform.OS === 'ios' ? e.duration || 250 : 250;
 
-      keyboardHideListener.current = Keyboard.addListener('keyboardDidHide', () => {
-        setKeyboardHeightState(0);
-        Animated.timing(keyboardHeight, {
-          toValue: 0,
-          duration: 250,
-          useNativeDriver: false,
-        }).start();
-      });
-    }
+      setKeyboardHeightState(offset);
+      Animated.timing(keyboardHeight, {
+        toValue: offset,
+        duration,
+        useNativeDriver: false,
+      }).start();
+
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      }, Platform.OS === 'ios' ? 50 : 300);
+    });
+
+    keyboardHideListener.current = Keyboard.addListener(hideEvent, (e) => {
+      const duration =
+        Platform.OS === 'ios' ? e?.duration || 250 : 250;
+      setKeyboardHeightState(0);
+      Animated.timing(keyboardHeight, {
+        toValue: 0,
+        duration,
+        useNativeDriver: false,
+      }).start();
+    });
 
     return () => {
-      if (Platform.OS === 'android') {
-        keyboardShowListener.current?.remove();
-        keyboardHideListener.current?.remove();
-      }
+      keyboardShowListener.current?.remove();
+      keyboardHideListener.current?.remove();
     };
-  }, []);
+  }, [insets.bottom, keyboardHeight]);
 
   const loadMessages = async (isRefresh = false) => {
     try {
@@ -436,7 +442,7 @@ export default function MessageDetailScreen() {
             contentContainerStyle={[
               messages.length === 0 ? styles.emptyListContainer : styles.messagesContainer,
               {
-                paddingBottom: Platform.OS === 'android' ? 10 + keyboardHeightState : 10,
+                paddingBottom: 10 + keyboardHeightState,
               },
             ]}
             ListEmptyComponent={renderEmptyState}
@@ -463,9 +469,7 @@ export default function MessageDetailScreen() {
           style={[
             styles.inputWrapper,
             {
-              paddingBottom: insets.bottom,
-            },
-            Platform.OS === 'android' && {
+              paddingBottom: keyboardHeightState > 0 ? 8 : Math.max(insets.bottom, 8),
               transform: [
                 {
                   translateY: Animated.multiply(keyboardHeight, -1),

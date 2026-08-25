@@ -36,7 +36,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>This app needs access to camera to take photos of meals for nutrition tracking.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string></string>
+	<string>Location is used to tag gym check-ins and improve camera features while you use the app.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>This app needs access to photo library to select meal images for nutrition tracking.</string>
 	<key>RCTNewArchEnabled</key>
