@@ -86,8 +86,6 @@ const WorkoutScreen = () => {
     }
   };
 
-  const API_BASE_URL = ENV_API_BASE_URL;
-
   const formatDisplayName = (value) => {
     if (!value) return '';
     return String(value)
