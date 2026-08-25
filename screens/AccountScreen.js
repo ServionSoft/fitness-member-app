@@ -14,7 +14,7 @@ import { getProfileImageSource } from '../utils/imageUtils';
 const AccountScreen = () => {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const { userData, refreshMemberDetails } = useAuth();
+  const { userData, refreshMemberDetails, logout } = useAuth();
   const [showShadow, setShowShadow] = useState(false);
   const [loading, setLoading] = useState(false);
   const [memberDetails, setMemberDetails] = useState(null);
@@ -29,13 +29,66 @@ const AccountScreen = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [showPhotoOptions, setShowPhotoOptions] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
 
   const API_BASE_URL = ENV_API_BASE_URL;
 
   // Helper function to show modern alert
-  const showAlert = (title, message, type = 'info') => {
-    setAlertConfig({ title, message, type });
+  const showAlert = (title, message, type = 'info', buttons = []) => {
+    setAlertConfig({ title, message, type, buttons });
     setAlertVisible(true);
+  };
+
+  const handleDeleteAccountPress = () => {
+    showAlert(
+      'Delete Account',
+      'You will lose all your data. This cannot be undone and your account cannot be recovered. Are you sure you want to delete your account?',
+      'warning',
+      [
+        { text: 'Cancel', onPress: () => {}, style: 'secondary' },
+        { text: 'Delete Account', onPress: confirmDeleteAccount, style: 'danger' },
+      ]
+    );
+  };
+
+  const confirmDeleteAccount = async () => {
+    try {
+      setDeletingAccount(true);
+      const userToken = await AsyncStorage.getItem('userToken');
+
+      if (!userToken) {
+        showAlert('Authentication Error', 'Please log in to delete your account.', 'error');
+        setDeletingAccount(false);
+        return;
+      }
+
+      let authHeader = userToken;
+      if (!userToken.startsWith('Bearer ')) {
+        authHeader = `Bearer ${userToken}`;
+      }
+
+      const response = await fetch(`${API_BASE_URL}/mobile/member/account`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': authHeader,
+        },
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.success) {
+        await logout();
+      } else {
+        showAlert('Error', data.message || 'Failed to delete account. Please try again.', 'error');
+      }
+    } catch (error) {
+      console.error('Error deleting account:', error);
+      showAlert('Error', 'Failed to delete account. Please check your internet connection.', 'error');
+    } finally {
+      setDeletingAccount(false);
+    }
   };
 
   // Fetch member details from API
@@ -693,6 +746,21 @@ const AccountScreen = () => {
                 </View>
               </TouchableOpacity>
             ))}
+
+            <TouchableOpacity
+              style={styles.deleteAccountButton}
+              onPress={handleDeleteAccountPress}
+              disabled={deletingAccount || saving}
+            >
+              {deletingAccount ? (
+                <ActivityIndicator size="small" color="#C62828" />
+              ) : (
+                <>
+                  <Ionicons name="trash-outline" size={18} color="#C62828" />
+                  <Text style={styles.deleteAccountText}>Delete Account</Text>
+                </>
+              )}
+            </TouchableOpacity>
           </>
         )}
       </ScrollView>
@@ -866,6 +934,7 @@ const AccountScreen = () => {
         title={alertConfig.title}
         message={alertConfig.message}
         type={alertConfig.type}
+        buttons={alertConfig.buttons || []}
         onClose={() => setAlertVisible(false)}
       />
     </View>
@@ -1114,6 +1183,26 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     marginTop: 4,
+  },
+  deleteAccountButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    paddingVertical: 16,
+    marginHorizontal: 18,
+    marginTop: 12,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: '#E57373',
+    elevation: 2,
+  },
+  deleteAccountText: {
+    color: '#C62828',
+    fontWeight: '700',
+    fontSize: 15,
+    marginLeft: 8,
   },
 });
 
