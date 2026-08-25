@@ -1,0 +1,38 @@
+# Env
+.env
+.env.*
+
+# Zip / archives
+*.zip
+
+# Node
+node_modules/
+
+# Android build junk
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# iOS
+ios/Pods/
+ios/build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Android native build cache
+android/app/.cxx/
+
+# Android generated folders (safe to ignore)
+android/app/src/main/res/mipmap-anydpi-v26/
+android/app/src/main/res/mipmap-ldpi/
+android/app/src/main/res/raw/
+
+# Docs if not needed
+docs/
