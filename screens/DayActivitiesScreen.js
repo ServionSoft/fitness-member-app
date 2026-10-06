@@ -5,7 +5,8 @@ import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/nativ
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { API_BASE_URL, BASE_URL } from '../utils/apiConfig';
+import { API_BASE_URL } from '../utils/apiConfig';
+import { getActivityThumbnailUrl } from '../utils/thumbnailUtils';
 import { useAuth } from '../contexts/AuthContext';
 import ModernAlert from '../components/ModernAlert';
 import { format } from 'date-fns';
@@ -435,27 +436,6 @@ const DayActivitiesScreen = () => {
     }
   };
 
-  const getThumbnailUrl = (activity) => {
-    if (activity.thumbnail_url) {
-      const match = activity.thumbnail_url.match(/thumbnails\/(.+)$/);
-      if (match) {
-        const filename = encodeURIComponent(match[1]);
-        return `${BASE_URL}/thumbnails/${filename}`;
-      } else if (activity.thumbnail_url.startsWith('http') && !activity.thumbnail_url.includes('localhost/APP_URL')) {
-        return activity.thumbnail_url;
-      }
-    } else if (activity.thumbnail) {
-      const match = activity.thumbnail.match(/thumbnails\/(.+)$/);
-      if (match) {
-        const filename = encodeURIComponent(match[1]);
-        return `${BASE_URL}/thumbnails/${filename}`;
-      } else if (activity.thumbnail.startsWith('http') && !activity.thumbnail.includes('localhost/APP_URL')) {
-        return activity.thumbnail;
-      }
-    }
-    return null;
-  };
-
   // Get day name from selected date (if provided) or use dayName from params or today's date
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   let targetDate = selectedDate;
@@ -483,9 +463,9 @@ const DayActivitiesScreen = () => {
     
         {/* Header Image */}
         <View style={styles.imageContainer}>
-          {dayActivities.length > 0 && getThumbnailUrl(dayActivities[0]) ? (
+          {dayActivities.length > 0 && getActivityThumbnailUrl(dayActivities[0]) ? (
             <Image
-              source={{ uri: getThumbnailUrl(dayActivities[0]) }}
+              source={{ uri: getActivityThumbnailUrl(dayActivities[0]) }}
               style={styles.headerImage}
               resizeMode="cover"
             />
@@ -554,9 +534,9 @@ const DayActivitiesScreen = () => {
               )}
               {dayActivities.map((activity, index) => (
                 <View key={index} style={styles.activityCard}>
-                  {getThumbnailUrl(activity) ? (
+                  {getActivityThumbnailUrl(activity) ? (
                     <Image
-                      source={{ uri: getThumbnailUrl(activity) }}
+                      source={{ uri: getActivityThumbnailUrl(activity) }}
                       style={styles.activityImage}
                       resizeMode="cover"
                     />

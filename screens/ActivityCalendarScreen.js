@@ -15,6 +15,7 @@ import { API_BASE_URL as ENV_API_BASE_URL } from '@env';
 import { useAuth } from '../contexts/AuthContext';
 import ModernAlert from '../components/ModernAlert';
 import { fetchAssignedWorkoutDetails } from '../api/workouts';
+import { getActivityThumbnailUrl } from '../utils/thumbnailUtils';
 
 const { width: screenWidth } = Dimensions.get('window');
 
@@ -488,24 +489,7 @@ const ActivityCalendarScreen = () => {
                     ? dayActivityPlan.activities[0] 
                     : null;
                   
-                  const getThumbnailUrl = (activity) => {
-                    if (!activity) return null;
-                    
-                    const thumbnailField = activity.thumbnail_url || activity.thumbnail;
-                    if (!thumbnailField) return null;
-                    
-                    // Extract filename from thumbnail URL
-                    const match = thumbnailField.match(/thumbnails\/(.+)$/);
-                    if (match) {
-                      const filename = encodeURIComponent(match[1].split('?')[0].split('#')[0].trim());
-                      return `${BASE_URL}/thumbnails/${filename}`;
-                    } else if (thumbnailField.startsWith('http') && !thumbnailField.includes('localhost/APP_URL')) {
-                      return thumbnailField;
-                    }
-                    return null;
-                  };
-                  
-                  const thumbnailUrl = getThumbnailUrl(firstActivity);
+                  const thumbnailUrl = getActivityThumbnailUrl(firstActivity);
                   
                   return thumbnailUrl ? (
                     <Image 
