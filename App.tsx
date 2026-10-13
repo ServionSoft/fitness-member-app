@@ -37,6 +37,7 @@ import WorkoutStart from './screens/WorkoutStart';
 import WorkoutSessionScreen from './screens/WorkoutSessionScreen';
 import WorkoutFinishedScreen from './screens/WorkoutFinishedScreen';
 import ActivityDetailsScreen from './screens/ActivityDetailsScreen';
+import ActivitySetEditorScreen from './screens/ActivitySetEditorScreen';
 import NutritionScreen from './screens/NutritionScreen';
 import NutritionDetailsScreen from './screens/NutritionDetailsScreen';
 import DiscoverScreen from './screens/DiscoverScreen';
@@ -205,6 +206,11 @@ function AppNavigator() {
               <Stack.Screen name="WorkoutSession" component={WorkoutSessionScreen} />
               <Stack.Screen name="WorkoutFinished" component={WorkoutFinishedScreen} />
               <Stack.Screen name="ActivityDetails" component={ActivityDetailsScreen} />
+              <Stack.Screen
+                name="ActivitySetEditor"
+                component={ActivitySetEditorScreen}
+                options={{ presentation: 'modal', headerShown: false }}
+              />
               <Stack.Screen name="NutritionScreen" component={NutritionScreen} />
               <Stack.Screen name="NutritionDetails" component={NutritionDetailsScreen} />
               <Stack.Screen name="DiscoverScreen" component={DiscoverScreen} />

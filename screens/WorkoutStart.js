@@ -11,6 +11,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL as ENV_API_BASE_URL } from '@env';
 import { useAuth } from '../contexts/AuthContext';
 import ModernAlert from '../components/ModernAlert';
+import {
+  mergeActivityWithCatalogDetails,
+  getActivityPrescription,
+  serializeSetRowsForNavigation,
+  extractPlanPrescription,
+} from '../utils/workoutPlanUtils';
+import { setActivityDetailsHandoff } from '../utils/activityDetailsHandoff';
+import { onWorkoutPlanUpdated } from '../utils/workoutPlanEvents';
 
 const WorkoutStart = () => {
   const navigation = useNavigation();
@@ -175,63 +183,39 @@ const WorkoutStart = () => {
         return;
       }
 
-      // Check if workout object already contains activities data
-      const workoutDays = workout.days || workout.workout_days;
-      if (workoutDays && Array.isArray(workoutDays) && workoutDays.length > 0) {
-        const days = workoutDays.map(day => day.day);
-        const dayData = workoutDays.find(day => day.day === selectedDay) || workoutDays[0];
-        const activities = dayData?.activities || dayData?.workout_activity_plans || [];
-        
-        if (activities.length > 0) {
-          const finalDays = days.length > 0 ? days : ['Monday'];
-          if (!days.includes(selectedDay)) setSelectedDay(finalDays[0]);
-          
-          // Enrich activities with full details (including thumbnails)
-          const enrichedActivities = await Promise.all(
-            activities.map(async (activity) => {
-              // If activity already has thumbnail, use it
-              if (activity.thumbnail_url || activity.thumbnail || 
-                  activity.exercise?.thumbnail_url || activity.exercise?.thumbnail ||
-                  activity.exercise_details?.thumbnail_url || activity.exercise_details?.thumbnail) {
-                return activity;
-              }
+      const pickDayActivities = (dayData) => {
+        if (!dayData) return [];
+        const plans = dayData.workout_activity_plans;
+        const acts = dayData.activities;
+        if (Array.isArray(plans) && plans.length > 0) return plans;
+        if (Array.isArray(acts) && acts.length > 0) return acts;
+        return [];
+      };
 
-              // Otherwise, fetch full details using exercise_id
-              const exerciseId = activity.exercise_id || activity.id;
-              if (exerciseId) {
-                const fullDetails = await fetchActivityDetails(exerciseId);
-                if (fullDetails) {
-                  // Merge full details with existing activity data
-                  return {
-                    ...activity,
-                    ...fullDetails,
-                    // Preserve original fields
-                    exercise_id: activity.exercise_id || fullDetails.exercise_id || fullDetails.id,
-                    exercise_name: activity.exercise_name || fullDetails.exercise_name || fullDetails.name,
-                    sets: activity.sets || fullDetails.sets,
-                    reps: activity.reps || fullDetails.reps,
-                    rest_seconds: activity.rest_seconds || fullDetails.rest_seconds,
-                    // Include thumbnail from full details
-                    thumbnail_url: fullDetails.thumbnail_url || fullDetails.thumbnail || activity.thumbnail_url || activity.thumbnail,
-                    thumbnail: fullDetails.thumbnail || fullDetails.thumbnail_url || activity.thumbnail || activity.thumbnail_url,
-                    exercise: fullDetails.exercise || activity.exercise,
-                    exercise_details: fullDetails.exercise_details || activity.exercise_details,
-                  };
-                }
-              }
-              return activity;
-            })
-          );
-          
-          setWorkoutActivities(enrichedActivities);
-          setAvailableDays(finalDays);
-          fetchDayStatus(finalDays);
-          setLoading(false);
-          return;
-        }
-      }
-      
-      // Fetch from API
+      const enrichActivities = async (list) => Promise.all(
+        (list || []).map(async (activity) => {
+          const exerciseId = activity.exercise_id;
+          const hasMedia =
+            activity.thumbnail_url ||
+            activity.thumbnail ||
+            activity.video_link ||
+            activity.video_url ||
+            activity.exercise?.thumbnail_url ||
+            activity.exercise?.thumbnail;
+
+          if (hasMedia || !exerciseId) {
+            return mergeActivityWithCatalogDetails(activity, activity.exercise || null);
+          }
+
+          const fullDetails = await fetchActivityDetails(exerciseId);
+          if (fullDetails) {
+            return mergeActivityWithCatalogDetails(activity, fullDetails);
+          }
+          return activity;
+        })
+      );
+
+      // Always fetch workout activity plans so CRM/coach sets/reps/weight are used
       const authHeader = await getAuthHeader();
       if (!authHeader) {
         setError('Authentication required');
@@ -261,94 +245,33 @@ const WorkoutStart = () => {
           if (!days.includes(selectedDay)) setSelectedDay(finalDays[0]);
           
           const dayData = daysData.find(day => day.day === selectedDay) || daysData[0];
-          const dayActivities = dayData?.activities || [];
-          
-          // Enrich activities with full details (including thumbnails)
-          const enrichedActivities = await Promise.all(
-            dayActivities.map(async (activity) => {
-              // If activity already has thumbnail, use it
-              if (activity.thumbnail_url || activity.thumbnail || 
-                  activity.exercise?.thumbnail_url || activity.exercise?.thumbnail ||
-                  activity.exercise_details?.thumbnail_url || activity.exercise_details?.thumbnail) {
-                return activity;
-              }
-
-              // Otherwise, fetch full details using exercise_id
-              const exerciseId = activity.exercise_id || activity.id;
-              if (exerciseId) {
-                const fullDetails = await fetchActivityDetails(exerciseId);
-                if (fullDetails) {
-                  // Merge full details with existing activity data
-                  return {
-                    ...activity,
-                    ...fullDetails,
-                    // Preserve original fields
-                    exercise_id: activity.exercise_id || fullDetails.exercise_id || fullDetails.id,
-                    exercise_name: activity.exercise_name || fullDetails.exercise_name || fullDetails.name,
-                    sets: activity.sets || fullDetails.sets,
-                    reps: activity.reps || fullDetails.reps,
-                    rest_seconds: activity.rest_seconds || fullDetails.rest_seconds,
-                    // Include thumbnail from full details
-                    thumbnail_url: fullDetails.thumbnail_url || fullDetails.thumbnail || activity.thumbnail_url || activity.thumbnail,
-                    thumbnail: fullDetails.thumbnail || fullDetails.thumbnail_url || activity.thumbnail || activity.thumbnail_url,
-                    exercise: fullDetails.exercise || activity.exercise,
-                    exercise_details: fullDetails.exercise_details || activity.exercise_details,
-                  };
-                }
-              }
-              return activity;
-            })
-          );
+          const dayActivities = pickDayActivities(dayData);
+          const enrichedActivities = await enrichActivities(dayActivities);
           
           setWorkoutActivities(enrichedActivities);
           setAvailableDays(finalDays);
           fetchDayStatus(finalDays);
         } else {
           const finalDays = days.length > 0 ? days : ['Monday'];
-          
-          // Enrich activities with full details (including thumbnails)
-          const enrichedActivities = await Promise.all(
-            (activities || []).map(async (activity) => {
-              // If activity already has thumbnail, use it
-              if (activity.thumbnail_url || activity.thumbnail || 
-                  activity.exercise?.thumbnail_url || activity.exercise?.thumbnail ||
-                  activity.exercise_details?.thumbnail_url || activity.exercise_details?.thumbnail) {
-                return activity;
-              }
-
-              // Otherwise, fetch full details using exercise_id
-              const exerciseId = activity.exercise_id || activity.id;
-              if (exerciseId) {
-                const fullDetails = await fetchActivityDetails(exerciseId);
-                if (fullDetails) {
-                  // Merge full details with existing activity data
-                  return {
-                    ...activity,
-                    ...fullDetails,
-                    // Preserve original fields
-                    exercise_id: activity.exercise_id || fullDetails.exercise_id || fullDetails.id,
-                    exercise_name: activity.exercise_name || fullDetails.exercise_name || fullDetails.name,
-                    sets: activity.sets || fullDetails.sets,
-                    reps: activity.reps || fullDetails.reps,
-                    rest_seconds: activity.rest_seconds || fullDetails.rest_seconds,
-                    // Include thumbnail from full details
-                    thumbnail_url: fullDetails.thumbnail_url || fullDetails.thumbnail || activity.thumbnail_url || activity.thumbnail,
-                    thumbnail: fullDetails.thumbnail || fullDetails.thumbnail_url || activity.thumbnail || activity.thumbnail_url,
-                    exercise: fullDetails.exercise || activity.exercise,
-                    exercise_details: fullDetails.exercise_details || activity.exercise_details,
-                  };
-                }
-              }
-              return activity;
-            })
-          );
+          const enrichedActivities = await enrichActivities(activities || []);
           
           setWorkoutActivities(enrichedActivities);
           setAvailableDays(finalDays);
           fetchDayStatus(finalDays);
         }
       } else {
-        if (response.status === 404) {
+        // Fallback to embedded workout days if API fails
+        const workoutDays = workout.days || workout.workout_days;
+        if (workoutDays && Array.isArray(workoutDays) && workoutDays.length > 0) {
+          const days = workoutDays.map(day => day.day);
+          const dayData = workoutDays.find(day => day.day === selectedDay) || workoutDays[0];
+          const embedded = pickDayActivities(dayData);
+          const finalDays = days.length > 0 ? days : ['Monday'];
+          if (!days.includes(selectedDay)) setSelectedDay(finalDays[0]);
+          setWorkoutActivities(await enrichActivities(embedded));
+          setAvailableDays(finalDays);
+          fetchDayStatus(finalDays);
+        } else if (response.status === 404) {
           setWorkoutActivities([]);
           setError(null);
         } else {
@@ -463,22 +386,7 @@ const WorkoutStart = () => {
             if (exerciseId) {
               const fullDetails = await fetchActivityDetails(exerciseId);
               if (fullDetails) {
-                // Merge full details with existing activity data
-                return {
-                  ...activity,
-                  ...fullDetails,
-                  // Preserve original fields
-                  exercise_id: activity.exercise_id || fullDetails.exercise_id || fullDetails.id,
-                  exercise_name: activity.exercise_name || fullDetails.exercise_name || fullDetails.name,
-                  sets: activity.sets || fullDetails.sets,
-                  reps: activity.reps || fullDetails.reps,
-                  rest_seconds: activity.rest_seconds || fullDetails.rest_seconds,
-                  // Include thumbnail from full details
-                  thumbnail_url: fullDetails.thumbnail_url || fullDetails.thumbnail || activity.thumbnail_url || activity.thumbnail,
-                  thumbnail: fullDetails.thumbnail || fullDetails.thumbnail_url || activity.thumbnail || activity.thumbnail_url,
-                  exercise: fullDetails.exercise || activity.exercise,
-                  exercise_details: fullDetails.exercise_details || activity.exercise_details,
-                };
+                return mergeActivityWithCatalogDetails(activity, fullDetails);
               }
             }
             return activity;
@@ -529,6 +437,28 @@ const WorkoutStart = () => {
       }
     }, [availableDays.length])
   );
+
+  // Sync activities when sets saved from editor
+  useEffect(() => {
+    return onWorkoutPlanUpdated(({ activity: updated }) => {
+      if (!updated) return;
+      const updatedId = updated.id || updated.activity_id || updated.plan_id;
+      setWorkoutActivities((prev) =>
+        prev.map((item) => {
+          const itemId = item.id || item.activity_id || item.plan_id;
+          if (String(itemId) !== String(updatedId)) return item;
+          return {
+            ...item,
+            ...updated,
+            sets_configuration:
+              updated.sets_configuration || updated.plan_sets_configuration,
+            plan_sets_configuration:
+              updated.sets_configuration || updated.plan_sets_configuration,
+          };
+        })
+      );
+    });
+  }, []);
 
   // Event Handlers
   const handleDayChange = (day) => {
@@ -738,9 +668,11 @@ const WorkoutStart = () => {
             const rawExerciseName = activity.exercise_name || activity.name || activity.activity_name || 'Activity';
             const exerciseName = toTitleCase(rawExerciseName); // Convert to Title Case
             const description = activity.exercise_details?.description || activity.exercise?.description || activity.description || activity.activity_description || 'No description available';
-            const sets = activity.sets || 'N/A';
-            const reps = activity.reps || 'N/A';
-            const restSeconds = activity.rest_seconds || activity.rest || 'N/A';
+            const prescription = getActivityPrescription(activity);
+            const sets = prescription.sets ?? 'N/A';
+            const reps = prescription.reps ?? 'N/A';
+            const restSeconds = prescription.rest_seconds ?? 'N/A';
+            const weight = prescription.weight;
             const isCompleted = activity.completed || activity.is_completed || isCurrentDayCompleted;
             
             return (
@@ -751,9 +683,23 @@ const WorkoutStart = () => {
                   isCompleted && styles.activityCardCompleted
                 ]}
                 onPress={() => {
-                  navigation.navigate('ActivityDetails', { 
-                    activity, 
-                    workoutId: getWorkoutId(workout), 
+                  const navSetRows = serializeSetRowsForNavigation(activity);
+                  const navActivity = {
+                    ...activity,
+                    ...extractPlanPrescription(activity),
+                    sets: navSetRows.length || activity.sets,
+                    sets_configuration: navSetRows,
+                    plan_sets_configuration: navSetRows,
+                  };
+                  setActivityDetailsHandoff({
+                    activity: navActivity,
+                    displaySetRows: navSetRows,
+                  });
+                  navigation.push('ActivityDetails', {
+                    activity: navActivity,
+                    displaySetRows: navSetRows,
+                    displaySetRowsJson: JSON.stringify(navSetRows),
+                    workoutId: getWorkoutId(workout),
                     selectedDay,
                   });
                 }}
@@ -784,8 +730,8 @@ const WorkoutStart = () => {
                       )}
                     </View>
                     
-                    {/* Sets and Reps - Compact inline design */}
-                    {(activity.sets || activity.reps) && (
+                    {/* Sets / Reps / Rest / Weight from coach-CRM plan */}
+                    {(prescription.sets != null || prescription.reps != null) && (
                       <View style={styles.setsRepsContainer}>
                         <View style={styles.setsRepsItem}>
                           <Text style={styles.setsRepsValue}>{sets !== 'N/A' ? sets : 'N/A'}</Text>
@@ -801,6 +747,15 @@ const WorkoutStart = () => {
                           <Text style={styles.setsRepsValue}>{restSeconds !== 'N/A' ? `${restSeconds}s` : 'N/A'}</Text>
                           <Text style={styles.setsRepsLabel}>Rest</Text>
                         </View>
+                        {weight != null && weight > 0 ? (
+                          <>
+                            <View style={styles.setsRepsDivider} />
+                            <View style={styles.setsRepsItem}>
+                              <Text style={styles.setsRepsValue}>{weight}</Text>
+                              <Text style={styles.setsRepsLabel}>lbs</Text>
+                            </View>
+                          </>
+                        ) : null}
                       </View>
                     )}
                   </View>

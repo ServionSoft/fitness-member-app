@@ -16,6 +16,14 @@ import ModernAlert from '../components/ModernAlert';
 import { deleteMemberWorkout } from '../api/workouts';
 import { useQueryClient } from '@tanstack/react-query';
 import { workoutKeys } from '../api/queryKeys';
+import {
+  mergeActivityWithCatalogDetails,
+  getDisplaySetRows,
+  serializeSetRowsForNavigation,
+  extractPlanPrescription,
+} from '../utils/workoutPlanUtils';
+import { setActivityDetailsHandoff } from '../utils/activityDetailsHandoff';
+import { onWorkoutPlanUpdated } from '../utils/workoutPlanEvents';
 
 const { width: screenWidth } = Dimensions.get('window');
 
@@ -29,6 +37,7 @@ const WorkoutDetailsScreen = () => {
   const queryClient = useQueryClient();
   const [menuVisible, setMenuVisible] = useState(false);
   const [workoutActivities, setWorkoutActivities] = useState([]);
+  const [workoutPlanDays, setWorkoutPlanDays] = useState([]); // Fresh days from plans API (CRM/coach sets)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [selectedDay, setSelectedDay] = useState('Monday');
@@ -150,6 +159,16 @@ const WorkoutDetailsScreen = () => {
     return dayMap[dayName] || 1;
   };
 
+  // Prefer workout_activity_plans (CRM/coach saved sets/reps/weight) over catalog `activities`
+  const getDayPlanActivities = (dayData) => {
+    if (!dayData) return [];
+    const plans = dayData.workout_activity_plans;
+    const acts = dayData.activities;
+    if (Array.isArray(plans) && plans.length > 0) return plans;
+    if (Array.isArray(acts) && acts.length > 0) return acts;
+    return [];
+  };
+
   // Helper function to extract activities for a specific day from workout object
   const getActivitiesForDay = (dayName, workoutData) => {
     if (!workoutData) return [];
@@ -165,8 +184,7 @@ const WorkoutDetailsScreen = () => {
     if (workoutDays) {
       const dayData = workoutDays.find(day => day.day === dayName);
       if (dayData) {
-        // Handle both 'activities' and 'workout_activity_plans' structures
-        return dayData.activities || dayData.workout_activity_plans || [];
+        return getDayPlanActivities(dayData);
       }
     }
     
@@ -232,6 +250,47 @@ const WorkoutDetailsScreen = () => {
     }
   };
 
+  const enrichPlanActivities = async (activities) => {
+    if (!activities || activities.length === 0) return [];
+    return Promise.all(
+      activities.map(async (activity) => {
+        // Lock plan row id before catalog merge (catalog id must never replace it)
+        const planRowId =
+          activity.workout_activity_plan_id ||
+          activity.activity_plan_id ||
+          activity.id;
+        const base = {
+          ...activity,
+          id: planRowId,
+          workout_activity_plan_id: planRowId,
+          workout_id: activity.workout_id || getWorkoutId(workout) || null,
+        };
+
+        const exerciseId = base.exercise_id;
+        const hasMedia =
+          base.thumbnail_url ||
+          base.thumbnail ||
+          base.video_link ||
+          base.video_url ||
+          base.exercise?.thumbnail_url ||
+          base.exercise?.thumbnail;
+
+        if (hasMedia || !exerciseId) {
+          return mergeActivityWithCatalogDetails(
+            base,
+            base.exercise || base.exercise_details || null
+          );
+        }
+
+        const fullDetails = await fetchActivityDetails(exerciseId);
+        if (fullDetails) {
+          return mergeActivityWithCatalogDetails(base, fullDetails);
+        }
+        return base;
+      })
+    );
+  };
+
   const fetchWorkoutActivities = async () => {
     try {
       setLoading(true);
@@ -245,9 +304,56 @@ const WorkoutDetailsScreen = () => {
         return null;
       }
 
-      // Check if workout object already contains activities data
-      // If data comes from workout screen, use it and skip API call entirely
-      // Handle both 'days' and 'workout_days' structures
+      const userToken = await AsyncStorage.getItem('userToken');
+      if (!userToken) {
+        setError('Authentication required');
+        setLoading(false);
+        return null;
+      }
+
+      let authHeader = userToken;
+      if (!userToken.startsWith('Bearer ')) {
+        authHeader = `Bearer ${userToken}`;
+      }
+
+      // Always load from workout activity plans API so CRM/coach sets/reps/weight are fresh
+      const endpoint = `${API_BASE_URL}/mobile/workout-activities/workout/${workoutId}`;
+      const response = await fetch(endpoint, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': authHeader,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          'Pragma': 'no-cache',
+        },
+        cache: 'no-store',
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const daysData = data?.data?.days || data?.days || [];
+
+          if (Array.isArray(daysData) && daysData.length > 0) {
+          setWorkoutPlanDays(daysData);
+          const days = daysData.map((d) => d.day).filter(Boolean);
+          const finalDays = days.length > 0 ? days : ['Monday'];
+          const activeDay = finalDays.includes(selectedDay) ? selectedDay : finalDays[0];
+          if (activeDay !== selectedDay) {
+            setSelectedDay(activeDay);
+          }
+
+          const dayData = daysData.find((d) => d.day === activeDay) || daysData[0];
+          const activities = getDayPlanActivities(dayData);
+          const enriched = await enrichPlanActivities(activities);
+          setWorkoutActivities(enriched);
+          setAvailableDays(finalDays);
+          setLoading(false);
+          return data;
+        }
+      }
+
+      // Fallback: embedded workout object (list payload)
       let workoutDays = null;
       if (workout.days && Array.isArray(workout.days) && workout.days.length > 0) {
         workoutDays = workout.days;
@@ -256,70 +362,29 @@ const WorkoutDetailsScreen = () => {
       }
 
       if (workoutDays) {
+        setWorkoutPlanDays(workoutDays);
         const days = workoutDays.map(day => day.day);
-        
-        // Find activities for the selected day using helper function
         let activities = [];
         if (!days.includes(selectedDay)) {
           const firstAvailableDay = days[0];
           setSelectedDay(firstAvailableDay);
-          activities = getActivitiesForDay(firstAvailableDay, workout);
+          activities = getDayPlanActivities(workoutDays.find((d) => d.day === firstAvailableDay));
         } else {
-          activities = getActivitiesForDay(selectedDay, workout);
+          activities = getDayPlanActivities(workoutDays.find((d) => d.day === selectedDay));
         }
-        
-        // Enrich activities with full details (including thumbnails)
-        if (activities && activities.length > 0) {
-          const enrichedActivities = await Promise.all(
-            activities.map(async (activity) => {
-              // If activity already has thumbnail, use it
-              if (activity.thumbnail_url || activity.thumbnail ||
-                  activity.exercise?.thumbnail_url || activity.exercise?.thumbnail ||
-                  activity.exercise_details?.thumbnail_url || activity.exercise_details?.thumbnail) {
-                return activity;
-              }
 
-              // Otherwise, fetch full details using exercise_id
-              const exerciseId = activity.exercise_id || activity.id;
-              if (exerciseId) {
-                const fullDetails = await fetchActivityDetails(exerciseId);
-                if (fullDetails) {
-                  // Merge full details with existing activity data
-                  return {
-                    ...activity,
-                    ...fullDetails,
-                    // Preserve original fields
-                    exercise_id: activity.exercise_id || fullDetails.exercise_id || fullDetails.id,
-                    exercise_name: activity.exercise_name || fullDetails.exercise_name || fullDetails.name,
-                    sets: activity.sets || fullDetails.sets,
-                    reps: activity.reps || fullDetails.reps,
-                    rest_seconds: activity.rest_seconds || fullDetails.rest_seconds,
-                    // Include thumbnail from full details
-                    thumbnail_url: fullDetails.thumbnail_url || fullDetails.thumbnail || activity.thumbnail_url || activity.thumbnail,
-                    thumbnail: fullDetails.thumbnail || fullDetails.thumbnail_url || activity.thumbnail || activity.thumbnail_url,
-                    exercise: fullDetails.exercise || activity.exercise,
-                    exercise_details: fullDetails.exercise_details || activity.exercise_details,
-                  };
-                }
-              }
-              return activity;
-            })
-          );
-          setWorkoutActivities(enrichedActivities);
-        } else {
-          setWorkoutActivities(activities || []);
-        }
-        
+        const enrichedActivities = await enrichPlanActivities(activities);
+        setWorkoutActivities(enrichedActivities);
         setAvailableDays(days.length > 0 ? days : ['Monday']);
         setLoading(false);
         return workout;
-      } else {
-        // No workout days found in workout object
-        setWorkoutActivities([]);
-        setAvailableDays(['Monday']);
-        setLoading(false);
-        return null;
       }
+
+      setWorkoutPlanDays([]);
+      setWorkoutActivities([]);
+      setAvailableDays(['Monday']);
+      setLoading(false);
+      return null;
     } catch (error) {
       setError('Network error occurred');
       return null;
@@ -356,17 +421,45 @@ const WorkoutDetailsScreen = () => {
     }, [workout?.id || workout?.workout_id, availableDays.length > 0 ? availableDays.join(',') : ''])
   );
 
-  // Update activities when selected day changes (use data from workout object)
+  // Keep cards in sync when sets are saved from editor (backend + local)
   useEffect(() => {
-    if (availableDays.length > 0 && availableDays.includes(selectedDay)) {
-      // Data comes from workout screen, use it directly
-      const activitiesFromWorkout = getActivitiesForDay(selectedDay, workout);
-      setWorkoutActivities(activitiesFromWorkout || []);
-      
-      // Always fetch status for the selected day
+    return onWorkoutPlanUpdated(({ activity: updated }) => {
+      if (!updated) return;
+      const updatedId = updated.id || updated.activity_id || updated.plan_id;
+      setWorkoutActivities((prev) =>
+        prev.map((item) => {
+          const itemId = item.id || item.activity_id || item.plan_id;
+          if (String(itemId) !== String(updatedId)) return item;
+          return {
+            ...item,
+            ...updated,
+            sets_configuration:
+              updated.sets_configuration || updated.plan_sets_configuration,
+            plan_sets_configuration:
+              updated.sets_configuration || updated.plan_sets_configuration,
+          };
+        })
+      );
+    });
+  }, []);
+
+  // Update activities when selected day changes — use fresh plan days, not stale route workout
+  useEffect(() => {
+    if (!availableDays.includes(selectedDay)) return;
+
+    const applyDay = async () => {
+      const sourceDays = workoutPlanDays.length > 0
+        ? workoutPlanDays
+        : (workout?.days || workout?.workout_days || []);
+      const dayData = (sourceDays || []).find((d) => d.day === selectedDay);
+      const activities = getDayPlanActivities(dayData);
+      const enriched = await enrichPlanActivities(activities);
+      setWorkoutActivities(enriched);
       fetchWorkoutStatus(selectedDay);
-    }
-  }, [selectedDay]);
+    };
+
+    applyDay();
+  }, [selectedDay, workoutPlanDays]);
 
   const handleDayChange = (day) => {
     setSelectedDay(day);
@@ -998,14 +1091,76 @@ const WorkoutDetailsScreen = () => {
                const activityId = activity.activity_id || activity.id || index;
                const exerciseName = activity.exercise_name || activity.name || activity.activity_name || 'Activity';
                const description = activity.exercise_details?.description || activity.exercise?.description || activity.description || activity.activity_description || 'No description available';
-               const sets = activity.sets || 'N/A';
-               const reps = activity.reps || 'N/A';
-               const restSeconds = activity.rest_seconds || activity.rest || 'N/A';
+               const setRows = getDisplaySetRows(activity);
+               // Exact rows shown on this card — pass through so details match 1:1
+               const navSetRows = serializeSetRowsForNavigation(activity);
+               const planRowId =
+                 activity.workout_activity_plan_id ||
+                 activity.activity_plan_id ||
+                 activity.id;
+               const navActivity = {
+                 ...activity,
+                 ...extractPlanPrescription(activity),
+                 id: planRowId,
+                 workout_activity_plan_id: planRowId,
+                 workout_id:
+                   activity.workout_id || getWorkoutId(workout) || null,
+                 sets: navSetRows.length || activity.sets,
+                 sets_configuration: navSetRows,
+                 plan_sets_configuration: navSetRows,
+               };
                
                // Check if current day is completed (day-specific check)
                const isCurrentDayCompleted = dayStatusMap[selectedDay] === 'completed';
                
                const activityHasVideo = hasVideo(activity);
+
+               const formatSetWeight = (w) => {
+                 const n = Number(String(w ?? '').replace(/[^\d.-]/g, ''));
+                 if (!Number.isFinite(n) || n <= 0) return null;
+                 return `${n} lbs`;
+               };
+
+               const openActivityDetails = () => {
+                 // Memory handoff — guarantees same rows as this card (5 sets stay 5)
+                 setActivityDetailsHandoff({
+                   activity: navActivity,
+                   displaySetRows: navSetRows,
+                 });
+                 navigation.push('ActivityDetails', {
+                   activity: navActivity,
+                   displaySetRows: navSetRows,
+                   displaySetRowsJson: JSON.stringify(navSetRows),
+                   workoutId: getWorkoutId(workout),
+                   selectedDay,
+                 });
+               };
+
+               const openSetEditor = () => {
+                 navigation.navigate('ActivitySetEditor', {
+                   activity: navActivity,
+                   workoutId: getWorkoutId(workout),
+                   onSave: (updatedActivity) => {
+                     const updatedRows = serializeSetRowsForNavigation(updatedActivity);
+                     setWorkoutActivities((prev) =>
+                       prev.map((item) => {
+                         const itemId = item.activity_id || item.id;
+                         if (String(itemId) !== String(activityId)) return item;
+                         return {
+                           ...item,
+                           ...updatedActivity,
+                           sets: updatedRows.length,
+                           sets_configuration: updatedRows,
+                           plan_sets_configuration: updatedRows,
+                           reps: updatedRows[0]?.reps ?? item.reps,
+                           rest_seconds: updatedRows[0]?.rest ?? item.rest_seconds,
+                           weight: updatedRows[0]?.weight ?? item.weight,
+                         };
+                       })
+                     );
+                   },
+                 });
+               };
                
                return (
                  <TouchableOpacity 
@@ -1014,11 +1169,7 @@ const WorkoutDetailsScreen = () => {
                      styles.activityCard,
                      isCurrentDayCompleted && styles.activityCardCompleted
                    ]}
-                   onPress={() => navigation.navigate('ActivityDetails', { 
-                     activity, 
-                     workoutId: getWorkoutId(workout), 
-                     selectedDay,
-                   })}
+                   onPress={openActivityDetails}
                    activeOpacity={0.7}
                  >
                    {/* Video Icon Button - Top Right */}
@@ -1027,11 +1178,7 @@ const WorkoutDetailsScreen = () => {
                        style={styles.videoIconButton}
                        onPress={(e) => {
                          e.stopPropagation();
-                         navigation.navigate('ActivityDetails', { 
-                           activity, 
-                           workoutId: getWorkoutId(workout), 
-                           selectedDay,
-                         });
+                         openActivityDetails();
                        }}
                        activeOpacity={0.7}
                      >
@@ -1064,26 +1211,53 @@ const WorkoutDetailsScreen = () => {
                            </View>
                          )}
                        </View>
-                       
-                       {/* Sets and Reps - Compact inline design */}
-                       {(activity.sets || activity.reps) && (
-                         <View style={styles.setsRepsContainer}>
-                           <View style={styles.setsRepsItem}>
-                             <Text style={styles.setsRepsValue}>{sets !== 'N/A' ? sets : 'N/A'}</Text>
-                             <Text style={styles.setsRepsLabel}>Sets</Text>
+                     </View>
+                   </View>
+
+                   {/* Per-set plan — 3 per row + add sets */}
+                   <View style={styles.perSetBlock}>
+                     {setRows.length > 0 ? (
+                       <Text style={styles.perSetCount}>
+                         {setRows.length} {setRows.length === 1 ? 'set' : 'sets'}
+                       </Text>
+                     ) : null}
+                     <View style={styles.perSetGrid}>
+                       {setRows.map((set, setIndex) => {
+                         const weightLabel = formatSetWeight(set.weight);
+                         const mainLabel =
+                           set.time != null && !(set.reps > 0)
+                             ? `${set.time}s`
+                             : `${set.reps ?? 0}×`;
+                         return (
+                           <View key={set.key || `set-${setIndex}`} style={styles.perSetCell}>
+                             <View style={styles.perSetChip}>
+                               <Text style={styles.perSetIndex}>Set {setIndex + 1}</Text>
+                               <Text style={styles.perSetMain} numberOfLines={1}>
+                                 {mainLabel}
+                                 {weightLabel ? ` · ${weightLabel}` : ''}
+                               </Text>
+                               <View style={styles.perSetRestRow}>
+                                 <Ionicons name="time-outline" size={11} color="#888" />
+                                 <Text style={styles.perSetRest}>{set.rest ?? 30}s</Text>
+                               </View>
+                             </View>
                            </View>
-                           <View style={styles.setsRepsDivider} />
-                           <View style={styles.setsRepsItem}>
-                             <Text style={styles.setsRepsValue}>{reps !== 'N/A' ? reps : 'N/A'}</Text>
-                             <Text style={styles.setsRepsLabel}>Reps</Text>
-                           </View>
-                           <View style={styles.setsRepsDivider} />
-                           <View style={styles.setsRepsItem}>
-                             <Text style={styles.setsRepsValue}>{restSeconds !== 'N/A' ? `${restSeconds}s` : 'N/A'}</Text>
-                             <Text style={styles.setsRepsLabel}>Rest</Text>
-                           </View>
+                         );
+                       })}
+
+                       {/* + to add / edit sets */}
+                       <TouchableOpacity
+                         style={styles.perSetCell}
+                         onPress={(e) => {
+                           e?.stopPropagation?.();
+                           openSetEditor();
+                         }}
+                         activeOpacity={0.75}
+                       >
+                         <View style={styles.perSetAddChip}>
+                           <Ionicons name="add" size={26} color="#222" />
                          </View>
-                       )}
+                       </TouchableOpacity>
                      </View>
                    </View>
                  </TouchableOpacity>
@@ -1465,15 +1639,22 @@ const styles = StyleSheet.create({
   },
   activityContent: {
     flexDirection: 'row',
+    alignItems: 'center',
+    paddingTop: 12,
+    paddingHorizontal: 12,
+    paddingBottom: 4,
+    gap: 10,
   },
   activityImage: {
-    width: 120,
-    height: 120,
+    width: 72,
+    height: 72,
     resizeMode: 'contain',
+    borderRadius: 10,
   },
   activityImagePlaceholder: {
-    width: 120,
-    height: 120,
+    width: 72,
+    height: 72,
+    borderRadius: 10,
     backgroundColor: '#f0f0f0',
     justifyContent: 'center',
     alignItems: 'center',
@@ -1535,36 +1716,78 @@ const styles = StyleSheet.create({
     color: '#666',
     fontWeight: '600',
   },
-  setsRepsContainer: {
+  perSetBlock: {
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    paddingTop: 4,
+  },
+  perSetCount: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#888',
+    marginBottom: 6,
+  },
+  perSetGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+  },
+  // Exactly 3 columns — outer cell is 33.33%, padding makes the gap
+  perSetCell: {
+    width: '33.333%',
+    paddingHorizontal: 3,
+    paddingBottom: 6,
+  },
+  perSetChip: {
+    backgroundColor: '#f8f9fa',
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderWidth: 1,
+    borderColor: '#ececec',
+  },
+  perSetAddChip: {
+    minHeight: 68,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#222',
+    borderStyle: 'dashed',
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  perSetIndex: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#999',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+    marginBottom: 2,
+  },
+  perSetMain: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#111',
+  },
+  perSetRestRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 3,
+    marginTop: 4,
+  },
+  perSetRest: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#666',
+  },
+  perSetFallback: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#666',
     backgroundColor: '#f8f9fa',
     borderRadius: 8,
     paddingVertical: 8,
-    paddingHorizontal: 12,
-    marginTop:5,
-  },
-  setsRepsItem: {
-    flex: 1,
-    alignItems: 'center',
-  },
-  setsRepsLabel: {
-    fontSize: 10,
-    color: '#6b7280',
-    fontWeight: '500',
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  setsRepsValue: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#1a1a1a',
-  },
-  setsRepsDivider: {
-    width: 1,
-    height: 24,
-    backgroundColor: '#e5e7eb',
-    marginHorizontal: 4,
+    paddingHorizontal: 10,
+    overflow: 'hidden',
   },
   completionBadge: {
     width: 24,

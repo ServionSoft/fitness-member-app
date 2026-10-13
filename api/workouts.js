@@ -285,6 +285,57 @@ export const updateMemberWorkout = async (workoutId, payload) => {
 };
 
 /**
+ * Update sets/reps/weight/rest for a workout_activity_plans row.
+ * PUT /mobile/workout-activities/plans/{planId}
+ */
+export const updateWorkoutActivityPlanSets = async (planId, payload) => {
+  const url = `${API_BASE_URL}/mobile/workout-activities/plans/${planId}`;
+  console.log('[updateWorkoutActivityPlanSets] REQUEST', {
+    url,
+    planId,
+    payload,
+  });
+
+  const authHeader = await getAuthHeader();
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      'Authorization': authHeader,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  const rawText = await response.text();
+  let data = {};
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch (e) {
+    console.log('[updateWorkoutActivityPlanSets] Non-JSON response', rawText);
+  }
+
+  console.log('[updateWorkoutActivityPlanSets] RESPONSE', {
+    status: response.status,
+    ok: response.ok,
+    data,
+  });
+
+  if (!response.ok) {
+    const errMsg =
+      data.message ||
+      (data.errors ? JSON.stringify(data.errors) : null) ||
+      'Failed to save sets';
+    const err = new Error(errMsg);
+    err.status = response.status;
+    err.response = data;
+    throw err;
+  }
+
+  return data.data || data;
+};
+
+/**
  * Delete a member-created workout.
  * DELETE /mobile/workouts/{id}
  */

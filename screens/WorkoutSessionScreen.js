@@ -12,6 +12,7 @@ import MenuModal from '../components/MenuModal';
 import menuItems, { handleMenuItemAction } from '../components/menuItems';
 import { useAuth } from '../contexts/AuthContext';
 import ModernAlert from '../components/ModernAlert';
+import { mergeActivityWithCatalogDetails, getSetPrescription } from '../utils/workoutPlanUtils';
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 
@@ -46,11 +47,11 @@ const WorkoutSessionScreen = () => {
   // Pre-countdown (3,2,1, GO) before actual set timer
   const [isPreCountdownActive, setIsPreCountdownActive] = useState(false);
   const [preCountdownIndex, setPreCountdownIndex] = useState(0); // 0..3 => ['3','2','1','GO']
-  // Rest period between sets
+  // Rest period between sets (duration comes from coach/CRM plan)
   const [restTimer, setRestTimer] = useState(0);
   const [isRestPeriod, setIsRestPeriod] = useState(false);
+  const [restDurationSeconds, setRestDurationSeconds] = useState(60);
   const SET_DURATION_SECONDS = 30;
-  const REST_DURATION_SECONDS = 10;
   
   // Refs for timers
   const sessionIntervalRef = useRef(null);
@@ -259,9 +260,11 @@ const WorkoutSessionScreen = () => {
   
   const currentActivity = enrichedActivities?.[currentActivityIndex];
   const totalActivities = enrichedActivities?.length || 0;
-  const totalSets = currentActivity ? (currentActivity.sets || 1) : 0;
-  const repsPerSet = currentActivity ? (currentActivity.reps || 10) : 0;
-  const progress = totalActivities > 0 ? ((currentActivityIndex + ((currentSet - 1 + (currentRep / repsPerSet)) / totalSets)) / totalActivities) * 100 : 0;
+  const currentSetPlan = getSetPrescription(currentActivity, currentSet);
+  const totalSets = currentSetPlan.sets || 1;
+  const repsPerSet = currentSetPlan.reps || 10;
+  const currentWeight = currentSetPlan.weight;
+  const progress = totalActivities > 0 ? ((currentActivityIndex + ((currentSet - 1 + (currentRep / Math.max(repsPerSet, 1))) / Math.max(totalSets, 1))) / totalActivities) * 100 : 0;
 
   // Helper function to normalize video URLs - replace localhost with production URL
   const normalizeVideoUrl = (videoUrl) => {
@@ -430,21 +433,7 @@ const WorkoutSessionScreen = () => {
                 'exercise.video_url': fullDetails.exercise?.video_url,
               });
               
-              // Merge full details with existing activity data
-              const merged = {
-                ...fullDetails,
-                ...activity, // Activity data overrides to preserve sets/reps from day plan
-                exercise: fullDetails.exercise || activity.exercise,
-                exercise_details: fullDetails.exercise_details || activity.exercise_details,
-                // Preserve day activity specific fields (these come from the day plan)
-                sets: activity.sets || fullDetails.sets,
-                reps: activity.reps || fullDetails.reps,
-                rest_seconds: activity.rest_seconds || fullDetails.rest_seconds,
-                // Preserve exercise_id and exercise_name from day activity
-                exercise_id: activity.exercise_id || fullDetails.exercise_id || fullDetails.id,
-                exercise_name: activity.exercise_name || fullDetails.exercise_name || fullDetails.name,
-              };
-              
+              const merged = mergeActivityWithCatalogDetails(activity, fullDetails);
               console.log(`Merged activity ${index + 1} has video:`, !!getVideoUrl(merged));
               return merged;
             } else {
@@ -791,12 +780,21 @@ const WorkoutSessionScreen = () => {
     }, 1000);
   };
 
-  // Start 10-second rest period
+  // Start rest using coach/CRM rest for the set just completed
   const startRestPeriod = () => {
-    setRestTimer(REST_DURATION_SECONDS);
+    const plan = getSetPrescription(currentActivity, currentSet);
+    const duration = Math.max(0, Number(plan.rest_seconds) || 60);
+    setRestDurationSeconds(duration);
+    setRestTimer(duration);
     setIsRestPeriod(true);
     // Video will be paused during rest (handled in Video component paused prop)
-    
+
+    if (duration <= 0) {
+      setIsRestPeriod(false);
+      moveToNextSet();
+      return;
+    }
+
     restTimerIntervalRef.current = setInterval(() => {
       setRestTimer(prev => {
         if (prev <= 1) {
@@ -1270,8 +1268,8 @@ const WorkoutSessionScreen = () => {
 
   // Calculate progress percentage for rest timer
   const getRestProgressPercentage = () => {
-    if (!isRestPeriod) return 0;
-    return ((REST_DURATION_SECONDS - restTimer) / REST_DURATION_SECONDS) * 100;
+    if (!isRestPeriod || !restDurationSeconds) return 0;
+    return ((restDurationSeconds - restTimer) / restDurationSeconds) * 100;
   };
 
   // Calculate stroke dash offset for circular progress
@@ -1630,6 +1628,9 @@ const WorkoutSessionScreen = () => {
           <View style={styles.setsInfo}>
             <Text style={styles.setsNumber}>{currentSet}/{totalSets}</Text>
             <Text style={styles.setsLabel}>Sets</Text>
+            <Text style={styles.setsMetaLabel}>
+              {repsPerSet} reps{currentWeight != null && currentWeight > 0 ? ` · ${currentWeight} lbs` : ''}
+            </Text>
           </View>
           <View style={styles.timerInfo}>
             <Text style={styles.timerNumber}>
@@ -2124,6 +2125,12 @@ const styles = StyleSheet.create({
     color: '#666',
     textAlign: 'center',
     marginTop: 2,
+  },
+  setsMetaLabel: {
+    fontSize: 12,
+    color: '#888',
+    textAlign: 'center',
+    marginTop: 4,
   },
   timerLabel: {
     fontSize: 14,

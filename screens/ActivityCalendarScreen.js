@@ -327,13 +327,21 @@ const ActivityCalendarScreen = () => {
             }) : null}
           </View>
         </View>
-        {/* No Workouts or Activities Message */}
-        {!loadingWorkouts && !loadingDayActivities && (!filteredWorkouts || filteredWorkouts.length === 0) && !dayActivityPlan && (
-          <Text style={styles.noWorkoutsText}>
-            {isSameDay(selectedDate, new Date()) 
-              ? 'No workouts or activities scheduled for today' 
-              : `No workouts or activities scheduled for ${format(selectedDate, 'MMMM d, yyyy')}`}
-          </Text>
+        {/* Empty day — plan CTA (same options as + FAB) */}
+        {!loadingWorkouts &&
+          !loadingDayActivities &&
+          (!filteredWorkouts || filteredWorkouts.length === 0) &&
+          !(dayActivityPlan?.activities?.length > 0) && (
+          <View style={styles.emptyPlanContainer}>
+            <Text style={styles.emptyPlanTitle}>Ready to plan your next activity?</Text>
+            <TouchableOpacity
+              style={styles.planSomethingBtn}
+              onPress={() => setFabModalVisible(true)}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.planSomethingBtnText}>Plan Something</Text>
+            </TouchableOpacity>
+          </View>
         )}
         {/* Date Label */}
         {(filteredWorkouts && filteredWorkouts.length > 0) || dayActivityPlan ? (
@@ -692,7 +700,32 @@ const styles = StyleSheet.create({
   calendarDayLabel: { color: '#888', fontWeight: '600', fontSize: 13 },
   calendarDayLabelActive: { color: '#fff' },
   calendarDayDate: { color: '#888', fontWeight: 'bold', fontSize: 15 },
-  noWorkoutsText: { fontWeight: '600', fontSize: 16, alignSelf: 'flex-start', marginLeft: '8%', marginTop: 18, marginBottom: 10, color: '#888' },
+  emptyPlanContainer: {
+    width: '90%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 48,
+    marginBottom: 24,
+    paddingHorizontal: 16,
+  },
+  emptyPlanTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#222',
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  planSomethingBtn: {
+    backgroundColor: '#222',
+    paddingVertical: 12,
+    paddingHorizontal: 28,
+    borderRadius: 24,
+  },
+  planSomethingBtnText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+  },
   todayLabel: { fontWeight: '600', fontSize: 16, alignSelf: 'flex-start', marginLeft: '8%', marginTop: 24, marginBottom: 10 },
   sectionTitle: { fontWeight: '700', fontSize: 18, alignSelf: 'flex-start', marginLeft: '8%', marginTop: 24, marginBottom: 12, color: '#222' },
   modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.35)', justifyContent: 'center', alignItems: 'center' },
