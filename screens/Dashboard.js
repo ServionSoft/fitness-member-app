@@ -569,7 +569,7 @@ export default function Dashboard() {
           />
         }
       >
-        {/* My Progress */}
+        {/* My Progress — opens CRM-aligned progress hub */}
         <Animated.View 
           style={[
             styles.titleContainer,
@@ -579,8 +579,21 @@ export default function Dashboard() {
             }
           ]}
         >
-          <Text style={styles.title}>My Progress</Text>
-          <Text style={styles.subtitle}>Track your fitness journey</Text>
+          <TouchableOpacity
+            activeOpacity={0.8}
+            onPress={() => navigation.navigate('MyProgress')}
+          >
+            <Text style={styles.title}>My Progress</Text>
+            <Text style={styles.subtitle}>Track your fitness journey</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.checkInCta}
+            activeOpacity={0.85}
+            onPress={() => navigation.navigate('WeeklyProgress', { openForm: true })}
+          >
+            <MaterialCommunityIcons name="scale-bathroom" size={18} color="#fff" />
+            <Text style={styles.checkInCtaText}>Log check-in / weight</Text>
+          </TouchableOpacity>
         </Animated.View>
         
         {/* Filter Row */}
@@ -716,6 +729,22 @@ const styles = StyleSheet.create({
     color: '#888',
     fontWeight: '500',
     letterSpacing: 0.3,
+  },
+  checkInCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    backgroundColor: '#222',
+    borderRadius: 20,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    marginTop: 14,
+    gap: 8,
+  },
+  checkInCtaText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
   },
   filterRow: {
     flexDirection: 'row',

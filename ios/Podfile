@@ -9,6 +9,9 @@ require Pod::Executable.execute_command('node', ['-p',
 # Required by Stripe Swift pods (fixes Stripe.modulemap not found).
 ENV['USE_FRAMEWORKS'] = 'static'
 
+# Required when using use_frameworks! with @react-native-firebase
+$RNFirebaseAsStaticFramework = true
+
 platform :ios, min_ios_version_supported
 prepare_react_native_project!
 

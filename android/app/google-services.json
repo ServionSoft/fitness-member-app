@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "600138026437",
+    "project_id": "tsf-member",
+    "storage_bucket": "tsf-member.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:600138026437:android:50c152c3080eaa384acfac",
+        "android_client_info": {
+          "package_name": "com.fitnessappmobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCnNDTKlTpU-k96XLOTjO3m06AFfMTLHSE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

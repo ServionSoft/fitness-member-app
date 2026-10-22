@@ -148,7 +148,9 @@ export const fetchAssignedWorkouts = async (filters = {}) => {
   }
 
   const data = await response.json();
-  return data.workouts || [];
+  // Align with Dashboard: tolerate { workouts } or { data }
+  const list = data.workouts || data.data || [];
+  return Array.isArray(list) ? list : [];
 };
 
 /**
@@ -209,6 +211,80 @@ export const fetchAllWorkouts = async (filters = {}) => {
 
   const result = await response.json();
   return result.data || [];
+};
+
+/**
+ * Fetch workout activity plans (days + sets) for a workout.
+ * GET /mobile/workout-activities/workout/{workoutId}
+ * @returns {{ days: Array, raw: object }}
+ */
+export const fetchWorkoutActivityPlansByWorkoutId = async (workoutId) => {
+  const authHeader = await getAuthHeader();
+  const response = await fetch(
+    `${API_BASE_URL}/mobile/workout-activities/workout/${workoutId}`,
+    {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: authHeader,
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        Pragma: 'no-cache',
+      },
+      cache: 'no-store',
+    }
+  );
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const err = new Error(errorData.message || 'Failed to fetch workout activity plans');
+    err.status = response.status;
+    throw err;
+  }
+
+  const raw = await response.json();
+  const days = raw?.data?.days || raw?.days || [];
+  return {
+    days: Array.isArray(days) ? days : [],
+    raw,
+  };
+};
+
+/**
+ * Fetch member day activity/status payload.
+ * GET /mobile/member-workouts/{workoutId}/day/{dayNumber}/activities
+ */
+export const fetchMemberWorkoutDayStatus = async (workoutId, dayNumber) => {
+  const authHeader = await getAuthHeader();
+  const response = await fetch(
+    `${API_BASE_URL}/mobile/member-workouts/${workoutId}/day/${dayNumber}/activities`,
+    {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: authHeader,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const err = new Error(errorData.message || 'Failed to fetch day status');
+    err.status = response.status;
+    throw err;
+  }
+
+  return response.json();
+};
+
+/** Normalize API day_status to 'completed' | 'pending' */
+export const parseMemberDayStatus = (data) => {
+  const apiStatus = String(data?.day_status || '').toLowerCase();
+  if (apiStatus === 'completed' || apiStatus === 'done' || apiStatus === 'finished') {
+    return 'completed';
+  }
+  return 'pending';
 };
 
 /**

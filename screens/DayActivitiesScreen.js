@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Image, ActivityIndicator, RefreshControl } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -10,20 +11,78 @@ import { getActivityThumbnailUrl } from '../utils/thumbnailUtils';
 import { useAuth } from '../contexts/AuthContext';
 import ModernAlert from '../components/ModernAlert';
 import { format } from 'date-fns';
+import { fetchDayActivityPlan } from '../api/dayActivities';
+import { dayActivityKeys } from '../api/queryKeys';
 
 const DayActivitiesScreen = () => {
   const navigation = useNavigation();
   const route = useRoute();
-  const { logout } = useAuth();
+  const { logout, userData } = useAuth();
+  const queryClient = useQueryClient();
+  const memberId = userData?.id ?? null;
   const { activities: initialActivities, dayName, selectedDate } = route.params || {};
 
-  const [dayActivities, setDayActivities] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [dayActivities, setDayActivities] = useState(
+    () => (initialActivities && initialActivities.length > 0 ? initialActivities : [])
+  );
   const [refreshing, setRefreshing] = useState(false);
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertConfig, setAlertConfig] = useState({ title: '', message: '', type: 'info', buttons: [] });
   const [dayActivityPlanId, setDayActivityPlanId] = useState(null);
   const [sessionStatus, setSessionStatus] = useState('not_started'); // not_started, in_progress, completed
+  // Prevent background query sync from wiping unsaved local list edits
+  const hasUnsavedLocalEditsRef = useRef(
+    !!(initialActivities && initialActivities.length > 0)
+  );
+
+  const resolvedTarget = useMemo(() => {
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    let targetDate = selectedDate;
+    if (!targetDate && dayName) {
+      targetDate = new Date();
+    } else if (!targetDate) {
+      targetDate = new Date();
+    }
+    if (typeof targetDate === 'string') {
+      targetDate = new Date(targetDate);
+    }
+    const currentDayName = dayName || days[targetDate.getDay()];
+    const dateStr = format(targetDate, 'yyyy-MM-dd');
+    return { targetDate, currentDayName, dateStr };
+  }, [selectedDate, dayName]);
+
+  const {
+    data: planData,
+    isLoading: isPlanLoading,
+    refetch: refetchPlan,
+  } = useQuery({
+    queryKey: dayActivityKeys.byDate(
+      memberId,
+      resolvedTarget.dateStr,
+      resolvedTarget.currentDayName
+    ),
+    queryFn: () =>
+      fetchDayActivityPlan({
+        day: resolvedTarget.currentDayName,
+        date: resolvedTarget.dateStr,
+      }),
+    enabled: !!memberId && !!resolvedTarget.dateStr,
+    staleTime: 20 * 1000,
+    gcTime: 5 * 60 * 1000,
+  });
+
+  // Sync from React Query only when local list is not mid-edit / pending save
+  useEffect(() => {
+    if (!planData) return;
+    if (!hasUnsavedLocalEditsRef.current) {
+      setDayActivities(planData.activities || []);
+    }
+    // Metadata is safe to refresh even during list edits
+    setDayActivityPlanId(planData.id ?? null);
+    setSessionStatus(planData.session_status || 'not_started');
+  }, [planData]);
+
+  const loading = isPlanLoading && dayActivities.length === 0;
 
   const showAlert = (title, message, type = 'info', autoClose = false) => {
     setAlertConfig({
@@ -42,98 +101,24 @@ const DayActivitiesScreen = () => {
     }
   };
 
-  const fetchDayActivities = async () => {
+  const invalidateDayPlanCache = useCallback(() => {
+    if (!memberId) return;
+    queryClient.invalidateQueries({
+      queryKey: dayActivityKeys.byDate(
+        memberId,
+        resolvedTarget.dateStr,
+        resolvedTarget.currentDayName
+      ),
+    });
+  }, [memberId, queryClient, resolvedTarget.dateStr, resolvedTarget.currentDayName]);
+
+  const fetchDayActivities = useCallback(async () => {
     try {
-      setLoading(true);
-      const userToken = await AsyncStorage.getItem('userToken');
-      if (!userToken) {
-        console.error('No user token found in fetchDayActivities');
-        showAlert('Error', 'Authentication required', 'error');
-        setLoading(false);
-        return;
-      }
-
-      const authHeader = userToken.startsWith('Bearer ') ? userToken : `Bearer ${userToken}`;
-      
-      // Get day name from selected date (if provided) or use dayName from params or today's date
-      const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-      let targetDate = selectedDate;
-      if (!targetDate && dayName) {
-        // If we have dayName but no date, use today (fallback)
-        targetDate = new Date();
-      } else if (!targetDate) {
-        targetDate = new Date();
-      }
-      // If selectedDate is a string, parse it
-      if (typeof targetDate === 'string') {
-        targetDate = new Date(targetDate);
-      }
-      const currentDayName = dayName || days[targetDate.getDay()];
-
-      // Format date as YYYY-MM-DD for query
-      const dateStr = format(targetDate, 'yyyy-MM-dd');
-      
-      // Build query parameters - include both day name and date
-      const params = new URLSearchParams();
-      params.append('day', currentDayName);
-      params.append('date', dateStr);
-      
-      console.log('Fetching day activities for date:', dateStr, 'Day:', currentDayName);
-      console.log('API URL:', `${API_BASE_URL}/mobile/day-activities?${params.toString()}`);
-
-      // Fetch day activities from backend using both day and date
-      const response = await fetch(`${API_BASE_URL}/mobile/day-activities?${params.toString()}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': authHeader,
-        },
-      });
-
-      console.log('Fetch response status:', response.status);
-
-      const result = await response.json();
-      console.log('Fetch response data:', JSON.stringify(result, null, 2));
-
-      if (response.ok) {
-        if (result.success && result.data) {
-          console.log('Successfully fetched day activities:', result.data);
-          setDayActivities(result.data.activities || []);
-          setDayActivityPlanId(result.data.id);
-          setSessionStatus(result.data.session_status || 'not_started');
-        } else {
-          console.log('No data in response, using initial activities if available');
-          if (initialActivities && initialActivities.length > 0) {
-            setDayActivities(initialActivities);
-          }
-        }
-      } else {
-        console.error('Fetch failed:', {
-          status: response.status,
-          statusText: response.statusText,
-          data: result,
-        });
-        // If fetch fails but we have initial activities, use them
-        if (initialActivities && initialActivities.length > 0) {
-          console.log('Using initial activities as fallback');
-          setDayActivities(initialActivities);
-        }
-      }
-    } catch (error) {
-      console.error('Exception fetching day activities:', error);
-      console.error('Error stack:', error.stack);
-      console.error('Error message:', error.message);
-      // Fallback to initial activities if available
-      if (initialActivities && initialActivities.length > 0) {
-        console.log('Using initial activities as fallback after error');
-        setDayActivities(initialActivities);
-      }
+      await refetchPlan();
     } finally {
-      setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, [refetchPlan]);
 
   const saveDayActivities = async (activitiesToSaveOverride = null) => {
     try {
@@ -272,9 +257,22 @@ const DayActivitiesScreen = () => {
           setDayActivityPlanId(responseData.data.id);
           console.log('Activities saved successfully, plan ID:', responseData.data.id);
           showAlert('Success', 'Activities saved successfully!', 'success', true); // Auto-close after 2 seconds
-          
+          // Local list now matches what we posted — allow cache sync again
+          hasUnsavedLocalEditsRef.current = false;
+          // Optimistically seed cache so sync does not flash older data
+          if (memberId && responseData.data) {
+            queryClient.setQueryData(
+              dayActivityKeys.byDate(
+                memberId,
+                resolvedTarget.dateStr,
+                resolvedTarget.currentDayName
+              ),
+              responseData.data
+            );
+          }
           // Refresh activities list after successful save
           setTimeout(() => {
+            invalidateDayPlanCache();
             fetchDayActivities();
           }, 500); // Wait a bit for backend to process
         } else {
@@ -306,24 +304,6 @@ const DayActivitiesScreen = () => {
     }
   };
 
-  useEffect(() => {
-    console.log('DayActivitiesScreen mounted with initialActivities:', {
-      hasInitialActivities: !!initialActivities,
-      initialActivitiesLength: initialActivities?.length || 0,
-      initialActivities: initialActivities,
-      dayName: dayName,
-    });
-
-    if (initialActivities && initialActivities.length > 0) {
-      console.log('Setting dayActivities from initialActivities');
-      setDayActivities(initialActivities);
-      setLoading(false);
-    } else {
-      console.log('No initial activities, fetching from backend');
-      fetchDayActivities();
-    }
-  }, []);
-
   // Separate effect to save activities when dayActivities state is set from initialActivities
   const hasSavedRef = useRef(false);
   useEffect(() => {
@@ -336,49 +316,42 @@ const DayActivitiesScreen = () => {
       // Use a ref or check to prevent multiple saves
       saveDayActivities();
     }
-  }, [dayActivities.length]); // Only trigger when activities count changes
+    // Intentionally only depend on length — auto-save once after nav handoff
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayActivities.length]);
 
   // Handle navigation params updates (for when coming back from SelectActivities with new activities)
   useFocusEffect(
     useCallback(() => {
       // Check for new activities from SelectActivities
-      const route = navigation.getState()?.routes?.find(r => r.name === 'DayActivities');
-      const params = route?.params;
+      const focusedRoute = navigation.getState()?.routes?.find(r => r.name === 'DayActivities');
+      const params = focusedRoute?.params;
       const newActivities = params?.newActivities;
       const isAddingActivities = params?.isAddingActivities;
       
       if (isAddingActivities && newActivities && Array.isArray(newActivities) && newActivities.length > 0) {
         console.log('Received new activities to add:', newActivities.length);
-        // Replace all activities with the merged list (existing + new)
+        hasUnsavedLocalEditsRef.current = true;
         setDayActivities(newActivities);
-        console.log('Updated dayActivities count:', newActivities.length);
-        
-        // Save to backend
         setTimeout(() => {
           saveDayActivities(newActivities);
         }, 100);
-        
-        // Clear the navigation params to prevent re-triggering
         navigation.setParams({ newActivities: undefined, isAddingActivities: false });
-      } else {
-        // Always refresh when screen comes into focus to show latest activities
-        // This ensures activities created for a date show up when viewing that date
-        // Only refresh if we don't have initial activities (to avoid double loading)
-        if (!initialActivities || initialActivities.length === 0) {
-          fetchDayActivities();
-        } else {
-          // If we have initial activities, still refresh to get latest from backend
-          // This ensures we see newly added activities
-          fetchDayActivities();
-        }
+      } else if (!hasUnsavedLocalEditsRef.current) {
+        // Soft-refresh only when local list is not dirty (avoids mid-edit overwrite)
+        invalidateDayPlanCache();
       }
-    }, [navigation, selectedDate])
+      // saveDayActivities is recreated each render; list it would retrigger focus work
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [navigation, invalidateDayPlanCache])
   );
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
+    // Explicit user refresh — accept server as source of truth
+    hasUnsavedLocalEditsRef.current = false;
     fetchDayActivities();
-  }, []);
+  }, [fetchDayActivities]);
 
   const handleStartSession = async () => {
     if (dayActivities.length === 0) {
@@ -413,6 +386,7 @@ const DayActivitiesScreen = () => {
           const result = await response.json();
           if (result.success) {
             setSessionStatus('in_progress');
+            invalidateDayPlanCache();
           }
         }
       }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Dimensions, Image, ActivityIndicator, Platform } from 'react-native';
-import { useNavigation, useRoute } from '@react-navigation/native';
+import { useNavigation, useRoute, usePreventRemove } from '@react-navigation/native';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -13,6 +13,8 @@ import menuItems, { handleMenuItemAction } from '../components/menuItems';
 import { useAuth } from '../contexts/AuthContext';
 import ModernAlert from '../components/ModernAlert';
 import { mergeActivityWithCatalogDetails, getSetPrescription } from '../utils/workoutPlanUtils';
+import { useQueryClient } from '@tanstack/react-query';
+import { workoutKeys, dayActivityKeys } from '../api/queryKeys';
 
 const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
 
@@ -20,12 +22,17 @@ const WorkoutSessionScreen = () => {
   const navigation = useNavigation();
   const route = useRoute();
   const { workout, activities, selectedDay, workoutId, dayActivityPlanId, isDayActivity } = route.params || {};
-  const { logout } = useAuth();
+  const { logout, userData } = useAuth();
+  const queryClient = useQueryClient();
+  const memberId = userData?.id ?? null;
   
   // Menu state
   const [menuVisible, setMenuVisible] = useState(false);
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertConfig, setAlertConfig] = useState({ title: '', message: '', type: 'info', buttons: [] });
+  // When true, navigation may remove this screen without the Stop Workout prompt
+  const [sessionExitAllowed, setSessionExitAllowed] = useState(false);
+  const stopPromptOpenRef = useRef(false);
   
   // Session state
   const [currentActivityIndex, setCurrentActivityIndex] = useState(0);
@@ -935,6 +942,24 @@ const WorkoutSessionScreen = () => {
       });
 
       if (response.ok) {
+        // Keep Details / Start / Calendar caches in sync with completed day
+        if (memberId) {
+          if (isDayActivity) {
+            // Session may not receive calendar date — invalidate all plans for this member
+            queryClient.invalidateQueries({
+              queryKey: [...dayActivityKeys.all, memberId],
+            });
+          } else if (workoutId && selectedDay) {
+            queryClient.invalidateQueries({
+              queryKey: workoutKeys.dayStatus(
+                workoutId,
+                getDayNumber(selectedDay),
+                memberId
+              ),
+            });
+          }
+        }
+
         // Update challenge progress (non-blocking)
         try {
           const ChallengeProgressService = require('../services/ChallengeProgressService').default;
@@ -950,6 +975,9 @@ const WorkoutSessionScreen = () => {
         const successMessage = isDayActivity 
           ? `You've completed your ${selectedDay} activities!`
           : `You've completed your ${selectedDay} workout!`;
+
+        // Allow leave without Stop confirmation after a successful completion
+        setSessionExitAllowed(true);
         
         setAlertConfig({
           title: 'Congratulations!',
@@ -1120,30 +1148,48 @@ const WorkoutSessionScreen = () => {
     }
   };
 
-  // Stop workout and go back
+  // Stop button: request leave via navigation so usePreventRemove shows the same confirmation
+  // (also covers Android hardware back via App.tsx goBack, and iOS swipe-back)
   const stopWorkout = () => {
-    setAlertConfig({
-      title: 'Stop Workout',
-      message: 'Are you sure you want to stop this workout? Your progress will not be saved.',
-      type: 'warning',
-      buttons: [
-        {
-          text: 'Cancel',
-          onPress: () => {},
-          style: 'secondary',
-        },
-        {
-          text: 'Stop',
-          onPress: () => {
-            stopTimers();
-            navigation.goBack();
-          },
-          style: 'primary',
-        },
-      ],
-    });
-    setAlertVisible(true);
+    navigation.goBack();
   };
+
+  // Single removal guard for native-stack (replaces the Android-only BackHandler to avoid duplicate alerts).
+  // Does not cover push navigations (menu) or auth remount on logout — those are handled separately below.
+  usePreventRemove(
+    !sessionExitAllowed && Boolean(currentActivity),
+    ({ data }) => {
+      if (stopPromptOpenRef.current) {
+        return;
+      }
+      stopPromptOpenRef.current = true;
+      setAlertConfig({
+        title: 'Stop Workout',
+        message: 'Are you sure you want to stop this workout? Your progress will not be saved.',
+        type: 'warning',
+        buttons: [
+          {
+            text: 'Cancel',
+            onPress: () => {
+              stopPromptOpenRef.current = false;
+            },
+            style: 'secondary',
+          },
+          {
+            text: 'Stop',
+            onPress: () => {
+              stopPromptOpenRef.current = false;
+              stopTimers();
+              // Re-dispatch the same action (visited-route keys allow it through)
+              navigation.dispatch(data.action);
+            },
+            style: 'primary',
+          },
+        ],
+      });
+      setAlertVisible(true);
+    }
+  );
 
   // Complete current rep
   const completeRep = () => {
@@ -1456,6 +1502,9 @@ const WorkoutSessionScreen = () => {
   }, [activities?.length]); // Only depend on activities length, not the full object
 
   // Logout handler
+  // Note: confirming logout remounts the auth stack (conditional render in App.tsx),
+  // which bypasses usePreventRemove. We stop timers here so intervals do not linger;
+  // we do not replace logout with the Stop Workout prompt (would trap or double-confirm).
   const handleLogoutRequest = (logoutFunction) => {
     setAlertConfig({
       title: 'Logout',
@@ -1469,7 +1518,11 @@ const WorkoutSessionScreen = () => {
         },
         {
           text: 'Logout',
-          onPress: () => logoutFunction(),
+          onPress: () => {
+            stopTimers();
+            setSessionExitAllowed(true);
+            logoutFunction();
+          },
           style: 'secondary',
         },
       ],
@@ -1479,7 +1532,44 @@ const WorkoutSessionScreen = () => {
 
   const handleMenuItemPress = (item) => {
     setMenuVisible(false);
-    handleMenuItemAction(item, navigation, logout, handleLogoutRequest);
+    if (item.label === 'Logout') {
+      handleMenuItemAction(item, navigation, logout, handleLogoutRequest);
+      return;
+    }
+    // Menu uses navigate() (push) — screen is not removed, so usePreventRemove does not run.
+    if (sessionExitAllowed || !currentActivity) {
+      handleMenuItemAction(item, navigation, logout, handleLogoutRequest);
+      return;
+    }
+    if (stopPromptOpenRef.current) {
+      return;
+    }
+    stopPromptOpenRef.current = true;
+    setAlertConfig({
+      title: 'Stop Workout',
+      message: 'Are you sure you want to stop this workout? Your progress will not be saved.',
+      type: 'warning',
+      buttons: [
+        {
+          text: 'Cancel',
+          onPress: () => {
+            stopPromptOpenRef.current = false;
+          },
+          style: 'secondary',
+        },
+        {
+          text: 'Stop',
+          onPress: () => {
+            stopPromptOpenRef.current = false;
+            stopTimers();
+            setSessionExitAllowed(true);
+            handleMenuItemAction(item, navigation, logout, handleLogoutRequest);
+          },
+          style: 'primary',
+        },
+      ],
+    });
+    setAlertVisible(true);
   };
 
   const renderMenuIcon = (item, idx) => {
@@ -1818,7 +1908,10 @@ const WorkoutSessionScreen = () => {
         message={alertConfig.message}
         type={alertConfig.type}
         buttons={alertConfig.buttons}
-        onClose={() => setAlertVisible(false)}
+        onClose={() => {
+          stopPromptOpenRef.current = false;
+          setAlertVisible(false);
+        }}
       />
     </View>
   );

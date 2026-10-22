@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Image, Dimensions, ActivityIndicator, Modal, TouchableWithoutFeedback, RefreshControl } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import HeaderBar from '../components/HeaderBar';
@@ -6,18 +6,27 @@ import MenuModal from '../components/MenuModal';
 import BottomNavBar from '../components/BottomNavBar';
 import menuItems, { handleMenuItemAction } from '../components/menuItems';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import Feather from 'react-native-vector-icons/Feather';
 import { addDays, startOfWeek, format, isSameDay, startOfMonth, endOfMonth, endOfWeek, addMonths, isSameMonth, parseISO } from 'date-fns';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL as ENV_API_BASE_URL } from '@env';
 import { useAuth } from '../contexts/AuthContext';
 import ModernAlert from '../components/ModernAlert';
-import { fetchAssignedWorkoutDetails } from '../api/workouts';
+import { fetchAssignedWorkoutDetails, fetchAssignedWorkouts } from '../api/workouts';
+import { fetchDayActivityPlan } from '../api/dayActivities';
+import {
+  workoutKeys,
+  defaultAllWorkoutsFilterOptions,
+  emptyAllWorkoutsApiFilters,
+  dayActivityKeys,
+} from '../api/queryKeys';
 import { getActivityThumbnailUrl } from '../utils/thumbnailUtils';
 
 const { width: screenWidth } = Dimensions.get('window');
+/** Stable empty list — `data = []` in useQuery creates a new array every render and can freeze the screen. */
+const EMPTY_WORKOUTS = [];
 
 const getWeekDates = (date = new Date()) => {
   const weekStart = startOfWeek(date, { weekStartsOn: 0 }); // Sunday
@@ -37,17 +46,13 @@ const getWeekDates = (date = new Date()) => {
 
 const ActivityCalendarScreen = () => {
   const insets = useSafeAreaInsets();
-  const { logout } = useAuth();
+  const { logout, userData } = useAuth();
+  const queryClient = useQueryClient();
+  const memberId = userData?.id ?? null;
   const [menuVisible, setMenuVisible] = useState(false);
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [calendarVisible, setCalendarVisible] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState(new Date());
-  const [assignedWorkouts, setAssignedWorkouts] = useState([]); // Assigned workouts
-  const [filteredWorkouts, setFilteredWorkouts] = useState([]); // Workouts filtered by selected date
-  const [dayActivityPlan, setDayActivityPlan] = useState(null); // Day activity plan for selected day
-  const [loadingWorkouts, setLoadingWorkouts] = useState(false);
-  const [loadingDayActivities, setLoadingDayActivities] = useState(false);
-  const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertConfig, setAlertConfig] = useState({ title: '', message: '', type: 'info', buttons: [] });
@@ -56,6 +61,53 @@ const ActivityCalendarScreen = () => {
 
   const API_BASE_URL = ENV_API_BASE_URL;
   const BASE_URL = API_BASE_URL.replace('/api', ''); // For image URLs
+
+  // Get day name from date
+  const getDayNameFromDate = useCallback((date) => {
+    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    return days[date.getDay()];
+  }, []);
+
+  const selectedDateStr = format(selectedDate, 'yyyy-MM-dd');
+  const selectedDayName = getDayNameFromDate(selectedDate);
+  const todayStr = format(new Date(), 'yyyy-MM-dd');
+
+  // Same unfiltered key as WorkoutScreen default assigned list
+  const {
+    data: assignedWorkoutsData,
+    isLoading: isLoadingAssigned,
+    refetch: refetchAssigned,
+  } = useQuery({
+    queryKey: [...workoutKeys.assignedWorkouts(memberId), defaultAllWorkoutsFilterOptions, ''],
+    queryFn: () =>
+      fetchAssignedWorkouts({
+        ...emptyAllWorkoutsApiFilters,
+        search: '',
+      }),
+    enabled: !!memberId,
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
+
+  const assignedWorkouts = assignedWorkoutsData ?? EMPTY_WORKOUTS;
+
+  // Custom day-activity plan for the selected calendar date (distinct from CRM dayStatus)
+  const {
+    data: dayActivityPlan = null,
+    isLoading: isLoadingDayPlan,
+    refetch: refetchDayPlan,
+  } = useQuery({
+    queryKey: dayActivityKeys.byDate(memberId, selectedDateStr, selectedDayName),
+    queryFn: () =>
+      fetchDayActivityPlan({ day: selectedDayName, date: selectedDateStr }),
+    enabled: !!memberId && !!selectedDateStr,
+    staleTime: 20 * 1000,
+    gcTime: 5 * 60 * 1000,
+  });
+
+  const loadingWorkouts = isLoadingAssigned && assignedWorkouts.length === 0;
+  // Section spinner only when no cached plan for this date yet
+  const loadingDayActivities = isLoadingDayPlan && !dayActivityPlan;
 
   const handleLogoutRequest = (logoutFunction) => {
     setAlertConfig({
@@ -95,183 +147,58 @@ const ActivityCalendarScreen = () => {
     );
   };
 
-  const [weekDates, setWeekDates] = useState(() => getWeekDates());
+  const weekDates = useMemo(() => getWeekDates(selectedDate), [selectedDateStr]);
 
-  // Filter workouts by selected date (based on start_date from assignment)
-  const filterWorkoutsByDate = useCallback((workouts, date) => {
-    if (!workouts || workouts.length === 0) {
-      setFilteredWorkouts([]);
-      return;
-    }
+  // Derive filtered list — no setState in effect (avoids render loops)
+  const filteredWorkouts = useMemo(() => {
+    if (!assignedWorkouts.length) return EMPTY_WORKOUTS;
 
-    const selectedDateStr = format(date, 'yyyy-MM-dd');
-    
-    const filtered = workouts.filter(workout => {
-      // Check if workout has assignment data with start_date
+    return assignedWorkouts.filter((workout) => {
       const startDate = workout.start_date || workout.assignment?.start_date;
-      
+
+      // Undated: only show on today so list stays findable without flooding every day
       if (!startDate) {
-        return false;
+        return selectedDateStr === todayStr;
       }
-      
-      // Handle both date formats: "2025-12-09" or Date objects
-      const workoutDateStr = typeof startDate === 'string' 
-        ? startDate.split('T')[0] // Remove time if present
-        : format(new Date(startDate), 'yyyy-MM-dd');
-      
-      // Check if selected date is within the assignment date range
+
+      const workoutDateStr =
+        typeof startDate === 'string'
+          ? startDate.split('T')[0]
+          : format(new Date(startDate), 'yyyy-MM-dd');
+
       const endDate = workout.end_date || workout.assignment?.end_date;
       if (endDate) {
-        const endDateStr = typeof endDate === 'string' 
-          ? endDate.split('T')[0]
-          : format(new Date(endDate), 'yyyy-MM-dd');
-        const isInRange = selectedDateStr >= workoutDateStr && selectedDateStr <= endDateStr;
-        return isInRange;
+        const endDateStr =
+          typeof endDate === 'string'
+            ? endDate.split('T')[0]
+            : format(new Date(endDate), 'yyyy-MM-dd');
+        return selectedDateStr >= workoutDateStr && selectedDateStr <= endDateStr;
       }
-      
-      const isMatch = workoutDateStr === selectedDateStr;
-      return isMatch;
+
+      return workoutDateStr === selectedDateStr;
     });
-    
-    setFilteredWorkouts(filtered);
-  }, []);
+  }, [assignedWorkouts, selectedDateStr, todayStr]);
 
-  // Update filtered workouts when selectedDate or assignedWorkouts changes
-  useEffect(() => {
-    if (assignedWorkouts.length > 0) {
-      filterWorkoutsByDate(assignedWorkouts, selectedDate);
-    } else {
-      setFilteredWorkouts([]);
-    }
-  }, [selectedDate, assignedWorkouts, filterWorkoutsByDate]);
-
-  // Update week dates when selected date changes (to show the week containing selected date)
-  useEffect(() => {
-    setWeekDates(getWeekDates(selectedDate));
-  }, [selectedDate]);
-
-  // Fetch assigned workouts
-  const fetchAssignedWorkouts = async () => {
-    try {
-      setLoadingWorkouts(true);
-
-      const userToken = await AsyncStorage.getItem('userToken');
-      if (!userToken) {
-        setLoadingWorkouts(false);
-        return null;
-      }
-
-      let authHeader = userToken;
-      if (!userToken.startsWith('Bearer ')) {
-        authHeader = `Bearer ${userToken}`;
-      }
-
-      const response = await fetch(`${API_BASE_URL}/mobile/member-workouts`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': authHeader,
-        },
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        const workoutsArray = result.workouts || result.data || [];
-        setAssignedWorkouts(workoutsArray);
-        return result;
-      } else {
-        setAssignedWorkouts([]);
-        return null;
-      }
-    } catch (err) {
-      setAssignedWorkouts([]);
-      return null;
-    } finally {
-      setLoadingWorkouts(false);
-    }
-  };
-
-  // Fetch day activities for a specific date
-  const fetchDayActivities = async (date) => {
-    try {
-      setLoadingDayActivities(true);
-      const userToken = await AsyncStorage.getItem('userToken');
-      if (!userToken) {
-        setLoadingDayActivities(false);
-        return;
-      }
-
-      let authHeader = userToken;
-      if (!userToken.startsWith('Bearer ')) {
-        authHeader = `Bearer ${userToken}`;
-      }
-
-      // Format date as YYYY-MM-DD and get day name
-      const dateStr = format(date, 'yyyy-MM-dd');
-      const dayName = getDayNameFromDate(date);
-
-      // Build query parameters - include both day name and date
-      const params = new URLSearchParams();
-      params.append('day', dayName);
-      params.append('date', dateStr);
-
-      const response = await fetch(`${API_BASE_URL}/mobile/day-activities?${params.toString()}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': authHeader,
-        },
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        if (result.success && result.data) {
-          // Store the full day activity plan data
-          setDayActivityPlan(result.data);
-        } else {
-          setDayActivityPlan(null);
-        }
-      } else {
-        setDayActivityPlan(null);
-      }
-    } catch (err) {
-      setDayActivityPlan(null);
-    } finally {
-      setLoadingDayActivities(false);
-    }
-  };
-
-  // Get day name from date
-  const getDayNameFromDate = (date) => {
-    const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-    return days[date.getDay()];
-  };
-
-  // Fetch day activities when selected date changes
-  useEffect(() => {
-    fetchDayActivities(selectedDate);
-  }, [selectedDate]);
-
-  useEffect(() => {
-    fetchAssignedWorkouts();
-  }, []);
-
-  // Refresh data when screen comes into focus
+  // Refresh day plan when screen gains focus only (not on every date change)
   useFocusEffect(
-    React.useCallback(() => {
-      fetchAssignedWorkouts();
-      fetchDayActivities(selectedDate);
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [selectedDate])
+    useCallback(() => {
+      if (!memberId) return undefined;
+      const dateStr = format(selectedDate, 'yyyy-MM-dd');
+      const dayName = getDayNameFromDate(selectedDate);
+      queryClient.invalidateQueries({
+        queryKey: dayActivityKeys.byDate(memberId, dateStr, dayName),
+      });
+      return undefined;
+    }, [memberId, queryClient, getDayNameFromDate])
   );
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await fetchAssignedWorkouts();
-    await fetchDayActivities(selectedDate);
-    setRefreshing(false);
+    try {
+      await Promise.all([refetchAssigned(), refetchDayPlan()]);
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   return (
@@ -311,13 +238,7 @@ const ActivityCalendarScreen = () => {
                 <TouchableOpacity
                   key={d.label + d.dateNum + idx}
                   style={[styles.calendarDay, isActive && styles.calendarDayActive]}
-                  onPress={() => {
-                    setSelectedDate(d.dateObj);
-                    // Filter workouts for the selected date
-                    if (assignedWorkouts.length > 0) {
-                      filterWorkoutsByDate(assignedWorkouts, d.dateObj);
-                    }
-                  }}
+                  onPress={() => setSelectedDate(d.dateObj)}
                   activeOpacity={0.7}
                 >
                   <Text style={[styles.calendarDayLabel, isActive && styles.calendarDayLabelActive]}>{d.label}</Text>
@@ -532,22 +453,14 @@ const ActivityCalendarScreen = () => {
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <TouchableOpacity 
-                onPress={() => {
-                  const newMonth = addMonths(calendarMonth, -1);
-                  setCalendarMonth(newMonth);
-                  setWeekDates(getWeekDates(newMonth));
-                }} 
+                onPress={() => setCalendarMonth(addMonths(calendarMonth, -1))} 
                 style={styles.navBtn}
               >
                 <Ionicons name="chevron-back" size={22} color="#222" />
               </TouchableOpacity>
               <Text style={styles.modalTitle}>{format(calendarMonth, 'MMMM yyyy')}</Text>
               <TouchableOpacity 
-                onPress={() => {
-                  const newMonth = addMonths(calendarMonth, 1);
-                  setCalendarMonth(newMonth);
-                  setWeekDates(getWeekDates(newMonth));
-                }} 
+                onPress={() => setCalendarMonth(addMonths(calendarMonth, 1))} 
                 style={styles.navBtn}
               >
                 <Ionicons name="chevron-forward" size={22} color="#222" />
@@ -573,15 +486,9 @@ const ActivityCalendarScreen = () => {
                     <TouchableOpacity
                       key={d.toISOString()}
                       style={[styles.dayCell, active && styles.dayCellActive]}
-                      onPress={() => { 
-                        setSelectedDate(d); 
+                      onPress={() => {
+                        setSelectedDate(d);
                         setCalendarVisible(false);
-                        // Update week dates to show the week containing the selected date
-                        setWeekDates(getWeekDates(d));
-                        // Filter workouts for the selected date
-                        if (assignedWorkouts.length > 0) {
-                          filterWorkoutsByDate(assignedWorkouts, d);
-                        }
                       }}
                       disabled={!inMonth}
                       activeOpacity={0.7}

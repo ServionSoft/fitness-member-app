@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView, TextInput, Dimensions, Image, ActivityIndicator, RefreshControl } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import HeaderBar from '../components/HeaderBar';
 import MenuModal from '../components/MenuModal';
 import menuItems, { handleMenuItemAction } from '../components/menuItems';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
+import { useQuery } from '@tanstack/react-query';
 import Ionicons from 'react-native-vector-icons/Ionicons';
 import Feather from 'react-native-vector-icons/Feather';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
@@ -15,6 +16,12 @@ import { DataCache } from '../utils/dataCache';
 import { API_BASE_URL, BASE_URL } from '../utils/apiConfig';
 import { useUnreadNotifications } from '../hooks/useUnreadNotifications';
 import ModernAlert from '../components/ModernAlert';
+import { fetchAllWorkouts } from '../api/workouts';
+import {
+  workoutKeys,
+  defaultAllWorkoutsFilterOptions,
+  emptyAllWorkoutsApiFilters,
+} from '../api/queryKeys';
 
 
 const { width: screenWidth } = Dimensions.get('window');
@@ -30,19 +37,37 @@ const DiscoverScreen = () => {
   const [alertConfig, setAlertConfig] = useState({ title: '', message: '', type: 'info', buttons: [] });
   const navigation = useNavigation();
   
-  // Data states
+  // Data states (schedule + activities still use DataCache; workouts use shared React Query)
   const [scheduleData, setScheduleData] = useState([]);
-  const [workoutData, setWorkoutData] = useState([]);
   const [activityData, setActivityData] = useState([]);
   const [loadingSchedule, setLoadingSchedule] = useState(true);
-  const [loadingWorkout, setLoadingWorkout] = useState(true);
   const [loadingActivity, setLoadingActivity] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   
   // Filtered data states for search
   const [filteredScheduleData, setFilteredScheduleData] = useState([]);
-  const [filteredWorkoutData, setFilteredWorkoutData] = useState([]);
   const [filteredActivityData, setFilteredActivityData] = useState([]);
+
+  // Same query key + helper as WorkoutScreen unfiltered /mobile/workouts/all
+  const {
+    data: allWorkouts = [],
+    isLoading: isLoadingWorkouts,
+    refetch: refetchWorkouts,
+  } = useQuery({
+    queryKey: [...workoutKeys.allWorkouts(), defaultAllWorkoutsFilterOptions],
+    queryFn: () => fetchAllWorkouts(emptyAllWorkoutsApiFilters),
+    staleTime: 5 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
+
+  // Preserve Discover preview: first 5 only (same as previous DataCache slice)
+  const workoutPreview = useMemo(
+    () => (Array.isArray(allWorkouts) ? allWorkouts.slice(0, 5) : []),
+    [allWorkouts]
+  );
+
+  // Section spinner only when there is no cached data yet
+  const loadingWorkout = isLoadingWorkouts && workoutPreview.length === 0;
 
   const handleLogoutRequest = (logoutFunction) => {
     setAlertConfig({
@@ -119,43 +144,6 @@ const DiscoverScreen = () => {
       console.error('Error fetching schedule:', error);
     } finally {
       setLoadingSchedule(false);
-    }
-  };
-
-  // Fetch workouts data with caching
-  const fetchWorkoutData = async () => {
-    try {
-      const cacheKey = 'discover_workouts';
-      const cachedData = await DataCache.get(cacheKey);
-      if (cachedData && cachedData.length > 0) {
-        setWorkoutData(cachedData);
-        setLoadingWorkout(false);
-      }
-
-      const userToken = await AsyncStorage.getItem('userToken');
-      if (!userToken) return;
-
-      let authHeader = userToken.startsWith('Bearer ') ? userToken : `Bearer ${userToken}`;
-      
-      const response = await fetch(`${API_BASE_URL}/mobile/workouts/all`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': authHeader,
-        },
-      });
-
-      if (response.ok) {
-        const result = await response.json();
-        const data = (result.data || []).slice(0, 5);
-        setWorkoutData(data);
-        if (data.length > 0) await DataCache.set(cacheKey, data);
-      }
-    } catch (error) {
-      console.error('Error fetching workouts:', error);
-    } finally {
-      setLoadingWorkout(false);
     }
   };
 
@@ -237,9 +225,10 @@ const DiscoverScreen = () => {
     setFilteredScheduleData(filterBySearch(scheduleData, search, 'schedule'));
   }, [scheduleData, search]);
 
-  useEffect(() => {
-    setFilteredWorkoutData(filterBySearch(workoutData, search, 'workout'));
-  }, [workoutData, search]);
+  const filteredWorkoutData = useMemo(
+    () => filterBySearch(workoutPreview, search, 'workout'),
+    [workoutPreview, search]
+  );
 
   useEffect(() => {
     setFilteredActivityData(filterBySearch(activityData, search, 'activity'));
@@ -247,7 +236,6 @@ const DiscoverScreen = () => {
 
   useEffect(() => {
     fetchScheduleData();
-    fetchWorkoutData();
     fetchActivityData();
   }, []);
 
@@ -255,21 +243,18 @@ const DiscoverScreen = () => {
   const onRefresh = async () => {
     setRefreshing(true);
     try {
-      // Clear cache and refetch all data
+      // Clear DataCache for schedule/activities only; workouts use React Query
       await Promise.all([
         DataCache.clear('discover_schedule'),
-        DataCache.clear('discover_workouts'),
         DataCache.clear('discover_activities'),
       ]);
       
-      // Refetch all data
       await Promise.all([
         fetchScheduleData(),
-        fetchWorkoutData(),
+        refetchWorkouts(),
         fetchActivityData(),
       ]);
       
-      // Refresh unread count
       refreshUnreadCount();
     } catch (error) {
       console.error('Error refreshing data:', error);
@@ -435,7 +420,7 @@ const DiscoverScreen = () => {
               );
             })
           ) : (
-            <Text style={styles.emptyText}>No workouts assigned yet</Text>
+            <Text style={styles.emptyText}>No workouts found</Text>
           )}
         </ScrollView>
         {/* Activities Section */}

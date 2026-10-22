@@ -242,15 +242,11 @@ const ScheduleScreen = () => {
     }
   };
 
-  useEffect(() => {
-    fetchMyWorkouts();
-    fetchMySchedules();
-  }, []);
-
-  // Refresh data when screen comes into focus (e.g., after booking/canceling from ScheduleDetailScreen)
+  // Single fetch path: runs on first focus (initial load) and again when returning
+  // (e.g. after booking/canceling from ScheduleDetailScreen). Avoids the previous
+  // mount useEffect + useFocusEffect double-request on first open.
   useFocusEffect(
     React.useCallback(() => {
-      // Refresh both calendar schedules and my bookings when returning to this screen
       fetchMyWorkouts();
       fetchMySchedules();
       // eslint-disable-next-line react-hooks/exhaustive-deps

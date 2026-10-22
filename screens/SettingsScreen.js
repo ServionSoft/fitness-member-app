@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Alert, Linking } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import HeaderBar from '../components/HeaderBar';
 import MenuModal from '../components/MenuModal';
@@ -80,10 +80,12 @@ const SettingsScreen = () => {
         {/* Settings Options */}
         <View style={styles.optionsContainer}>
           <SettingsOption icon="account" label="Account" onPress={() => navigation.navigate('AccountScreen')} />
-          <SettingsOption icon="bell" label="Notifications"  onPress={() => navigation.navigate('NotificationSettingsScreen')}/>
-          <SettingsOption icon="lock" label="Privacy"  onPress={() => navigation.navigate('PrivacyScreen')} />
+          <SettingsOption
+            icon="lock"
+            label="Privacy Policy"
+            onPress={() => Linking.openURL('https://phpstack-1542257-6177868.cloudwaysapps.com/app/privacy-policy')}
+          />
           {/* <SettingsOption icon="credit-card-outline" label="Payments" onPress={() => navigation.navigate('PaymentScreen')} /> */}
-          <SettingsOption icon="help-circle-outline" label="Help"  onPress={() => navigation.navigate('HelpScreen')}/>
         </View>
         {/* App Version */}
         <Text style={styles.version}>App version 11.5.9</Text>

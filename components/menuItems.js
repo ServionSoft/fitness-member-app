@@ -6,9 +6,10 @@ const menuItems = [
   { icon: 'clipboard-text', label: 'Tasks', lib: 'MaterialCommunityIcons' },
   { icon: 'food-apple-outline', label: 'Nutrition', lib: 'MaterialCommunityIcons' },
   { icon: 'dumbbell', label: 'Workouts', lib: 'MaterialCommunityIcons' },
-  { icon: 'image-multiple-outline', label: 'Progress Photos', lib: 'MaterialCommunityIcons' },
+  { icon: 'chart-line', label: 'My Progress', lib: 'MaterialCommunityIcons' },
+  { icon: 'scale-bathroom', label: 'Self Check-in', lib: 'MaterialCommunityIcons' },
   { icon: 'trophy', label: 'Challenges', lib: 'MaterialCommunityIcons' },
-  { icon: 'login', label: 'Check In/Out', lib: 'MaterialCommunityIcons' },
+  { icon: 'login', label: 'Gym Check In/Out', lib: 'MaterialCommunityIcons' },
   { icon: 'calendar-outline', label: 'Schedule', lib: 'Ionicons' },
   { icon: 'settings', label: 'Settings', lib: 'Feather' },
   { icon: 'logout', label: 'Logout', lib: 'MaterialCommunityIcons' },
@@ -42,16 +43,19 @@ export function handleMenuItemAction(item, navigation, logout, onLogoutRequest) 
     case 'Workouts':
       navigation.navigate('WorkoutScreen');
       break;
-    case 'Progress Photos':
-      navigation.navigate('ProgressPhotos');
+    case 'My Progress':
+      navigation.navigate('MyProgress');
       break;
-  
+    case 'Self Check-in':
+      navigation.navigate('WeeklyProgress', { openForm: true });
+      break;
     case 'Nutrition':
       navigation.navigate('NutritionScreen');
       break;
     case 'Challenges':
       navigation.navigate('ChallengesScreen');
       break;
+    case 'Gym Check In/Out':
     case 'Check In/Out':
       navigation.navigate('CheckInCheckOut');
       break;

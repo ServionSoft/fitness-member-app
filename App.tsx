@@ -7,9 +7,11 @@ import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import { AppState, AppStateStatus } from 'react-native';
 import ActivityLogService from './services/ActivityLogService';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { setupNotificationOpenHandlers } from './services/FirebaseMessagingService';
+import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
 import { StripeProvider } from '@stripe/stripe-react-native';
-import { API_BASE_URL as ENV_API_BASE_URL, STRIPE_PUBLISHABLE_KEY as ENV_STRIPE_PUBLISHABLE_KEY } from '@env';
+import { STRIPE_PUBLISHABLE_KEY as ENV_STRIPE_PUBLISHABLE_KEY } from '@env';
+import { DataCache } from './utils/dataCache';
 
 // @ts-ignore - Navigation ref typing
 import type { NavigationContainerRef } from '@react-navigation/native';
@@ -44,8 +46,6 @@ import DiscoverScreen from './screens/DiscoverScreen';
 import AllActivitiesScreen from './screens/AllActivitiesScreen';
 import DayActivitiesScreen from './screens/DayActivitiesScreen';
 import AccountScreen from './screens/AccountScreen';
-import HelpScreen from './screens/HelpScreen';
-import NotificationSettingsScreen from './screens/NotificationSettingsScreen';
 import PrivacyScreen from './screens/PrivacyScreen';
 import ChallengesScreen from './screens/ChallengesScreen';
 import ChallengeDetailsScreen from './screens/ChallengeDetailsScreen';
@@ -60,6 +60,7 @@ import ChatScreen from './screens/ChatScreen';
 import ContactsScreen from './screens/ContactsScreen';
 import MembershipScreen from './screens/MembershipScreen';
 import WeeklyProgressScreen from './screens/WeeklyProgressScreen';
+import MyProgressScreen from './screens/MyProgressScreen';
 import CheckInCheckOutScreen from './screens/CheckInCheckOutScreen';
 import BarcodeScannerScreen from './screens/BarcodeScannerScreen';
 import ProductDetailsScreen from './screens/ProductDetailsScreen';
@@ -97,6 +98,16 @@ const isStripeConfigured = STRIPE_PUBLISHABLE_KEY && STRIPE_PUBLISHABLE_KEY.star
 function AppNavigator() {
   const { isAuthenticated, isLoading, hasCompletedOnboarding } = useAuth();
   const navigationRef = React.useRef<NavigationContainerRef<any>>(null);
+  const [navReady, setNavReady] = React.useState(false);
+
+  // Push notification tap → open related screen (workout, nutrition, etc.)
+  React.useEffect(() => {
+    if (!isAuthenticated || isLoading || !navReady) {
+      return;
+    }
+    const unsubscribe = setupNotificationOpenHandlers(navigationRef);
+    return unsubscribe;
+  }, [isAuthenticated, isLoading, navReady]);
 
   // Handle Android back button
   // Navigate to previous page, or Dashboard if at root
@@ -150,7 +161,10 @@ function AppNavigator() {
   }
 
   const navigationContent = (
-    <NavigationContainer ref={navigationRef}>
+    <NavigationContainer
+      ref={navigationRef}
+      onReady={() => setNavReady(true)}
+    >
         <Stack.Navigator
           initialRouteName={
             !hasCompletedOnboarding 
@@ -217,10 +231,8 @@ function AppNavigator() {
               <Stack.Screen name="AllActivitiesScreen" component={AllActivitiesScreen} />
               <Stack.Screen name="DayActivitiesScreen" component={DayActivitiesScreen} />
               <Stack.Screen name="AccountScreen" component={AccountScreen} />
-              <Stack.Screen name="HelpScreen" component={HelpScreen} />
               <Stack.Screen name="PrivacyScreen" component={PrivacyScreen} />
               <Stack.Screen name="PaymentScreen" component={PaymentScreen} />
-              <Stack.Screen name="NotificationSettingsScreen" component={NotificationSettingsScreen} />
               <Stack.Screen name="ChallengesScreen" component={ChallengesScreen} />
               <Stack.Screen name="ChallengeDetails" component={ChallengeDetailsScreen} />
               <Stack.Screen name="CreateNutrition" component={CreateNutritionScreen} />
@@ -230,6 +242,7 @@ function AppNavigator() {
               <Stack.Screen name="SelectActivities" component={SelectActivitiesScreen} />
               <Stack.Screen name="PostsScreen" component={PostsScreen} />
               <Stack.Screen name="WeeklyProgress" component={WeeklyProgressScreen} />
+              <Stack.Screen name="MyProgress" component={MyProgressScreen} />
               <Stack.Screen name="CheckInCheckOut" component={CheckInCheckOutScreen} />
               <Stack.Screen name="BarcodeScanner" component={BarcodeScannerScreen} />
               <Stack.Screen name="ProductDetails" component={ProductDetailsScreen} />
@@ -256,6 +269,41 @@ function AppNavigator() {
 
   // Return without StripeProvider if not configured
   return navigationContent;
+}
+
+/**
+ * Clears React Query + AsyncStorage DataCache when a member logs out or
+ * switches accounts so the next user never sees another member's lists.
+ */
+function QueryCacheResetOnAuthChange() {
+  const { isAuthenticated, userData } = useAuth();
+  const queryClient = useQueryClient();
+  const prevUserIdRef = React.useRef<number | null | undefined>(undefined);
+  const didInitRef = React.useRef(false);
+
+  React.useEffect(() => {
+    const nextId = userData?.id ?? null;
+
+    if (!didInitRef.current) {
+      didInitRef.current = true;
+      prevUserIdRef.current = nextId;
+      return;
+    }
+
+    const prevId = prevUserIdRef.current;
+    const loggedOut = !isAuthenticated;
+    const switchedUser =
+      prevId != null && nextId != null && prevId !== nextId;
+
+    if (loggedOut || switchedUser) {
+      queryClient.clear();
+      DataCache.clearAll().catch(() => {});
+    }
+
+    prevUserIdRef.current = nextId;
+  }, [isAuthenticated, userData?.id, queryClient]);
+
+  return null;
 }
 
 function AppContent() {
@@ -320,6 +368,7 @@ export default function App() {
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <NotificationProvider>
+            <QueryCacheResetOnAuthChange />
             <AppContent />
           </NotificationProvider>
         </AuthProvider>

@@ -10,12 +10,13 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import Feather from 'react-native-vector-icons/Feather';
 import { useAuth } from '../contexts/AuthContext';
 import { fetchMyWorkouts, fetchAssignedWorkouts, fetchAllWorkouts, fetchAssignedWorkoutDetails, deleteMemberWorkout } from '../api/workouts';
-import { workoutKeys } from '../api/queryKeys';
+import { workoutKeys, defaultAllWorkoutsFilterOptions } from '../api/queryKeys';
 import { useQueryClient } from '@tanstack/react-query';
 import ModernAlert from '../components/ModernAlert';
 import { getWorkoutThumbnailUrl } from '../utils/thumbnailUtils';
 
 const { width: screenWidth } = Dimensions.get('window');
+const EMPTY_ASSIGNED_WORKOUTS = [];
 
 const WorkoutCardImage = ({ workout }) => {
   const [failed, setFailed] = useState(false);
@@ -54,14 +55,14 @@ const WorkoutScreen = () => {
   const [workoutOptionsModalVisible, setWorkoutOptionsModalVisible] = useState(false);
   const [workoutOptionsWorkout, setWorkoutOptionsWorkout] = useState(null);
   const [deletingWorkoutId, setDeletingWorkoutId] = useState(null);
-  const [selectedOptions, setSelectedOptions] = useState({
+  // Clone defaults so mutations never alter the shared query-key constant used by DiscoverScreen
+  const [selectedOptions, setSelectedOptions] = useState(() => ({
+    ...defaultAllWorkoutsFilterOptions,
     goals: [],
-    duration: null, // Single value for radio button (null, 'Any duration', '< 20 minutes', etc.)
     equipment: [],
     levels: [],
     workouts: [],
-    creator: null // Single value for radio button (null, 'All', or 'Created by me')
-  });
+  }));
   const navigation = useNavigation();
 
   // Helper function to handle back navigation - navigate to Dashboard if CreateWorkoutScreen is in stack
@@ -201,13 +202,13 @@ const WorkoutScreen = () => {
   // Query for assigned workouts (workouts assigned from CRM)
   // Include selectedOptions in query key so it refetches when filters change
   const {
-    data: assignedWorkouts = [],
+    data: assignedWorkoutsData,
     isLoading: isLoadingAssignedWorkouts,
     isFetching: isFetchingAssignedWorkouts,
     error: assignedWorkoutsError,
     refetch: refetchAssignedWorkouts,
   } = useQuery({
-    queryKey: [...workoutKeys.assignedWorkouts(), selectedOptions, search],
+    queryKey: [...workoutKeys.assignedWorkouts(userData?.id), selectedOptions, search],
     queryFn: () => fetchAssignedWorkouts({
       goals: selectedOptions.goals,
       durations: selectedOptions.duration ? [selectedOptions.duration] : [],
@@ -216,9 +217,11 @@ const WorkoutScreen = () => {
       workoutTypes: selectedOptions.workouts,
       search: search.trim(),
     }),
+    enabled: !!userData?.id,
     staleTime: 5 * 60 * 1000, // 5 minutes
     gcTime: 10 * 60 * 1000, // 10 minutes
   });
+  const assignedWorkouts = assignedWorkoutsData ?? EMPTY_ASSIGNED_WORKOUTS;
 
   // Query for all workouts (discover page - shared with DiscoverScreen via queryKey)
   // Include selectedOptions in query key so it refetches when filters change
@@ -328,6 +331,15 @@ const WorkoutScreen = () => {
             try {
               await deleteMemberWorkout(w.id);
               queryClient.invalidateQueries({ queryKey: workoutKeys.myWorkouts() });
+              queryClient.invalidateQueries({ queryKey: workoutKeys.allWorkouts() });
+              if (userData?.id) {
+                queryClient.invalidateQueries({
+                  queryKey: workoutKeys.activityPlans(w.id, userData.id),
+                });
+                queryClient.invalidateQueries({
+                  queryKey: [...workoutKeys.all, 'dayStatus', userData.id, w.id],
+                });
+              }
               closeWorkoutOptions();
             } catch (err) {
               setAlertConfig({
@@ -668,11 +680,12 @@ const WorkoutScreen = () => {
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.horizontalCardsRow}>
               {filteredAssignedWorkouts.map((workout, idx) => (
                 <TouchableOpacity
-                  key={workout.id}
+                  key={workout.id || workout.workout_id || `assigned-${idx}`}
                   style={[styles.workoutCard, { width: screenWidth * 0.65, marginRight: idx === filteredAssignedWorkouts.length - 1 ? 0 : 16 }]}
                   onPress={async () => {
+                    const workoutId = workout.id || workout.workout_id;
                     // Check if workout ID exists
-                    if (!workout.id) {
+                    if (!workoutId) {
                       console.error('No workout ID found for workout:', workout);
                       navigation.navigate('WorkoutDetails', { workout: workout });
                       return;
@@ -683,7 +696,7 @@ const WorkoutScreen = () => {
                     
                     // Fetch detailed workout data before navigating
                     try {
-                      const workoutDetails = await fetchAssignedWorkoutDetails(workout.id);
+                      const workoutDetails = await fetchAssignedWorkoutDetails(workoutId);
                       if (workoutDetails) {
                         // Extract the workout data from the API response
                         const detailedWorkout = workoutDetails.workout || workoutDetails.data || workoutDetails;

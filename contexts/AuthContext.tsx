@@ -2,10 +2,17 @@ import React, { createContext, useContext, useState, useEffect, ReactNode } from
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import ActivityLogService from '../services/ActivityLogService';
 import { cleanToken, isValidTokenFormat, storeToken, getAuthToken } from '../utils/tokenUtils';
+import { extractMemberIdFromDetails, extractMemberIdFromLoginUser } from '../utils/memberId';
+import {
+  initFirebaseMessaging,
+  cleanupFirebaseMessaging,
+} from '../services/FirebaseMessagingService';
 import { API_BASE_URL } from '@env';
 
 interface UserData {
   id: number;
+  /** CRM `members.id` — required for comparison-photos / progress sync */
+  member_id?: number | null;
   firstname: string;
   lastname: string;
   email: string;
@@ -99,11 +106,20 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       const cleanedToken = cleanToken(token);
       console.log('Storing token - Length:', cleanedToken.length, 'First 20 chars:', cleanedToken.substring(0, 20) + '...');
       
+      const memberIdFromLogin = extractMemberIdFromLoginUser(userData);
+      const userWithMember: UserData = {
+        ...userData,
+        member_id: memberIdFromLogin ?? userData.member_id ?? null,
+      };
+
       await storeToken(cleanedToken);
-      await AsyncStorage.setItem('userData', JSON.stringify(userData));
+      await AsyncStorage.setItem('userData', JSON.stringify(userWithMember));
+      if (userWithMember.member_id != null) {
+        await AsyncStorage.setItem('memberId', String(userWithMember.member_id));
+      }
       await AsyncStorage.setItem('tokenExpiry', expiry);
       setIsAuthenticated(true);
-      setUserData(userData);
+      setUserData(userWithMember);
       
       // Small delay to ensure token is fully stored before making API call
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -145,7 +161,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
 
   const logout = async () => {
     try {
-      await AsyncStorage.multiRemove(['userToken', 'userData', 'tokenExpiry']);
+      // Unregister FCM token while auth header is still available
+      await cleanupFirebaseMessaging();
+      await AsyncStorage.multiRemove(['userToken', 'userData', 'tokenExpiry', 'memberId']);
       setIsAuthenticated(false);
       setUserData(null);
     } catch (error) {
@@ -198,9 +216,13 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           // Get latest userData
           const latestUserData = userData || JSON.parse(await AsyncStorage.getItem('userData') || 'null') || currentUserData;
           
-          // Update userData with profile_image from member details
+          const resolvedMemberId =
+            extractMemberIdFromDetails(data.data) ?? latestUserData.member_id ?? null;
+
+          // Update userData with profile_image + members.id from member details
           const updatedUserData: UserData = {
             ...latestUserData,
+            member_id: resolvedMemberId,
             profile_image: data.data.profile_image || latestUserData.profile_image,
             firstname: data.data.firstname || latestUserData.firstname,
             lastname: data.data.lastname || latestUserData.lastname,
@@ -212,6 +234,9 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
           
           setUserData(updatedUserData);
           await AsyncStorage.setItem('userData', JSON.stringify(updatedUserData));
+          if (resolvedMemberId != null) {
+            await AsyncStorage.setItem('memberId', String(resolvedMemberId));
+          }
         }
       }
     } catch (error) {
@@ -231,6 +256,16 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     };
     initializeAuth();
   }, []);
+
+  // Phase 1: verify Firebase Messaging after auth (token log in __DEV__)
+  useEffect(() => {
+    if (!isAuthenticated || isLoading) {
+      return;
+    }
+    initFirebaseMessaging().catch(() => {
+      // Non-blocking — push registration is Phase 2
+    });
+  }, [isAuthenticated, isLoading]);
 
   const value: AuthContextType = {
     isAuthenticated,

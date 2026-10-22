@@ -327,7 +327,7 @@ export default function ProfileScreen() {
               } else if (item.label === 'Invoices') {
                 navigation.navigate('PaymentScreen');
               } else if (item.label === 'Weekly Progress') {
-                navigation.navigate('WeeklyProgress');
+                navigation.navigate('WeeklyProgress', { openForm: true });
               } else if (item.label === 'Notes') {
                 navigation.navigate('NotesScreen');
               }

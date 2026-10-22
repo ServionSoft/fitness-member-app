@@ -24,6 +24,7 @@ import ModernAlert from '../components/ModernAlert';
 import { fetchMemberWorkoutById, updateMemberWorkout } from '../api/workouts';
 import { useQueryClient } from '@tanstack/react-query';
 import { workoutKeys } from '../api/queryKeys';
+import { useAuth } from '../contexts/AuthContext';
 import { getActivityThumbnailUrl } from '../utils/thumbnailUtils';
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -127,6 +128,8 @@ const CreateWorkoutScreen = () => {
   const route = useRoute();
   const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
+  const { userData } = useAuth();
+  const memberId = userData?.id ?? null;
   const editWorkoutId = route.params?.editWorkoutId || null;
   const [loading, setLoading] = useState(false);
   const [loadEditWorkout, setLoadEditWorkout] = useState(!!route.params?.editWorkoutId);
@@ -690,6 +693,12 @@ const CreateWorkoutScreen = () => {
         const data = await updateMemberWorkout(editWorkoutId, payload);
         if (!data.success) throw new Error(data.message || 'Failed to update workout');
         queryClient.invalidateQueries({ queryKey: workoutKeys.myWorkouts() });
+        queryClient.invalidateQueries({ queryKey: workoutKeys.allWorkouts() });
+        if (memberId) {
+          queryClient.invalidateQueries({
+            queryKey: workoutKeys.activityPlans(editWorkoutId, memberId),
+          });
+        }
         resetForm();
         showAlert('Success', 'Workout updated successfully!', 'success', [
           { text: 'OK', onPress: () => navigation.replace('WorkoutScreen') }
@@ -705,6 +714,8 @@ const CreateWorkoutScreen = () => {
         if (!response.ok || !data.success) {
           throw new Error(data.message || 'Failed to create workout');
         }
+        queryClient.invalidateQueries({ queryKey: workoutKeys.myWorkouts() });
+        queryClient.invalidateQueries({ queryKey: workoutKeys.allWorkouts() });
         resetForm();
         showAlert('Success', 'Workout created successfully!', 'success', [
           { text: 'OK', onPress: () => navigation.replace('WorkoutScreen') }

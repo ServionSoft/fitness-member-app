@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -13,7 +13,7 @@ import {
   RefreshControl,
 } from 'react-native';
 import HeaderBar from '../components/HeaderBar';
-import { useNavigation } from '@react-navigation/native';
+import { useNavigation, useRoute, useFocusEffect } from '@react-navigation/native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import Ionicons from 'react-native-vector-icons/Ionicons';
@@ -25,10 +25,31 @@ import ModernAlert from '../components/ModernAlert';
 
 const { width: screenWidth } = Dimensions.get('window');
 
+/** Pull progress records from common API envelope shapes. */
+function extractProgressList(result) {
+  if (!result) return [];
+  const candidates = [
+    result.data,
+    result.records,
+    result.items,
+    result.results,
+    result.data?.data,
+    result.data?.records,
+    result.data?.items,
+    Array.isArray(result) ? result : null,
+  ];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) return candidate;
+  }
+  return [];
+}
+
 const WeeklyProgressScreen = () => {
   const navigation = useNavigation();
+  const route = useRoute();
   const insets = useSafeAreaInsets();
   const headerOffset = insets.top + 70;
+  const openedFromParamRef = useRef(false);
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -93,8 +114,9 @@ const WeeklyProgressScreen = () => {
 
       if (response.ok) {
         const result = await response.json();
-        if (result.success) {
-          setProgressRecords(result.data || []);
+        const list = extractProgressList(result);
+        if (list.length > 0 || result.success !== false) {
+          setProgressRecords(list);
         }
       }
     } catch (error) {
@@ -117,7 +139,7 @@ const WeeklyProgressScreen = () => {
   };
 
   // Open form modal
-  const openFormModal = () => {
+  const openFormModal = useCallback(() => {
     setFormData({
       date: new Date().toISOString().split('T')[0],
       weight: '',
@@ -137,7 +159,21 @@ const WeeklyProgressScreen = () => {
       notes: '',
     });
     setFormModalVisible(true);
-  };
+  }, []);
+
+  // Deep-link from Progress Photos / Dashboard: open form once, then clear param
+  useFocusEffect(
+    useCallback(() => {
+      if (route.params?.openForm && !openedFromParamRef.current) {
+        openedFromParamRef.current = true;
+        openFormModal();
+        navigation.setParams({ openForm: undefined });
+      }
+      return () => {
+        openedFromParamRef.current = false;
+      };
+    }, [route.params?.openForm, openFormModal, navigation])
+  );
 
   // Close form modal
   const closeFormModal = () => {
@@ -260,7 +296,9 @@ const WeeklyProgressScreen = () => {
         plan: formData.cardio_plan || null, // If backend needs both
         calories: formData.calories ? parseFloat(formData.calories) : null,
         protein: formData.protein ? parseFloat(formData.protein) : null,
-        carb: formData.carbs ? parseFloat(formData.carbs) : null, // Backend uses 'carb' not 'carbs'
+        // Spec uses `carbs`; some backends also accept `carb` — send both
+        carbs: formData.carbs ? parseFloat(formData.carbs) : null,
+        carb: formData.carbs ? parseFloat(formData.carbs) : null,
         fat: formData.fat ? parseFloat(formData.fat) : null,
         notes: formData.notes || null,
       };
@@ -363,7 +401,7 @@ const WeeklyProgressScreen = () => {
                     {record.weight && (
                       <View style={styles.recordItem}>
                         <Text style={styles.recordLabel}>Weight:</Text>
-                        <Text style={styles.recordValue}>{record.weight} kg</Text>
+                        <Text style={styles.recordValue}>{record.weight} lbs</Text>
                       </View>
                     )}
                     {record.bodyFat && (
@@ -458,7 +496,7 @@ const WeeklyProgressScreen = () => {
 
           {/* Weight */}
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Weight (kg)</Text>
+            <Text style={styles.label}>Weight (lbs)</Text>
             <TextInput
               style={styles.textInput}
               value={formData.weight}
@@ -717,7 +755,7 @@ const WeeklyProgressScreen = () => {
                     {selectedRecord.weight != null ? (
                       <View style={styles.detailsRow}>
                         <Text style={styles.detailsLabel}>Weight:</Text>
-                        <Text style={styles.detailsValue}>{selectedRecord.weight} kg</Text>
+                        <Text style={styles.detailsValue}>{selectedRecord.weight} lbs</Text>
                       </View>
                     ) : (
                       <Text style={styles.noDataText}>No weight data</Text>

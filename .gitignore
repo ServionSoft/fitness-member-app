@@ -36,3 +36,7 @@ android/app/src/main/res/raw/
 
 # Docs if not needed
 docs/
+
+# Firebase service account keys
+*-firebase-adminsdk*.json
+

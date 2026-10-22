@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ScrollView, Image, Dimensions, ActivityIndicator, Alert, RefreshControl, InteractionManager, Modal } from 'react-native';
 import LinearGradient from 'react-native-linear-gradient';
 import HeaderBar from '../components/HeaderBar';
@@ -13,8 +13,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { API_BASE_URL as ENV_API_BASE_URL } from '@env';
 import { useAuth } from '../contexts/AuthContext';
 import ModernAlert from '../components/ModernAlert';
-import { deleteMemberWorkout } from '../api/workouts';
-import { useQueryClient } from '@tanstack/react-query';
+import {
+  deleteMemberWorkout,
+  fetchWorkoutActivityPlansByWorkoutId,
+  fetchMemberWorkoutDayStatus,
+  parseMemberDayStatus,
+} from '../api/workouts';
+import { useQuery, useQueries, useQueryClient } from '@tanstack/react-query';
 import { workoutKeys } from '../api/queryKeys';
 import {
   mergeActivityWithCatalogDetails,
@@ -33,27 +38,33 @@ const WorkoutDetailsScreen = () => {
   const navigation = useNavigation();
   const route = useRoute();
   const { workout, canStartWorkout = true, isFromAllWorkouts = false, isCreatedByMember = false } = route.params || {};
-  const { logout } = useAuth();
+  const { logout, userData } = useAuth();
   const queryClient = useQueryClient();
+  const memberId = userData?.id ?? null;
   const [menuVisible, setMenuVisible] = useState(false);
   const [workoutActivities, setWorkoutActivities] = useState([]);
-  const [workoutPlanDays, setWorkoutPlanDays] = useState([]); // Fresh days from plans API (CRM/coach sets)
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
   const [selectedDay, setSelectedDay] = useState('Monday');
-  const [availableDays, setAvailableDays] = useState([]);
-  const [dayStatusMap, setDayStatusMap] = useState({}); // Track status per day: { Monday: 'completed', Tuesday: 'pending', ... }
+  const [refreshing, setRefreshing] = useState(false);
+  const [enriching, setEnriching] = useState(false);
   const [alertVisible, setAlertVisible] = useState(false);
   const [alertConfig, setAlertConfig] = useState({ title: '', message: '', type: 'info', buttons: [] });
   const [activeTab, setActiveTab] = useState('Activities'); // 'Activities' or 'Info'
   const [workoutOptionsModalVisible, setWorkoutOptionsModalVisible] = useState(false);
   const [deletingWorkoutId, setDeletingWorkoutId] = useState(null);
+  const enrichGenRef = useRef(0);
 
   const insets = useSafeAreaInsets();
   const API_BASE_URL = ENV_API_BASE_URL;
   const BASE_URL = API_BASE_URL.replace('/api', ''); // For image URLs
 
   const fixedHeaderTop = insets.top + 10;
+
+  const getWorkoutId = (workoutData) => {
+    if (!workoutData) return null;
+    return workoutData.id || workoutData.workout_id || null;
+  };
+
+  const workoutId = getWorkoutId(workout);
 
   // Helper function to get thumbnail URL for activities
   const getThumbnailUrl = (activity) => {
@@ -131,12 +142,6 @@ const WorkoutDetailsScreen = () => {
     }
   };
 
-  // Helper function to get workout ID (handles both 'id' and 'workout_id')
-  const getWorkoutId = (workoutData) => {
-    if (!workoutData) return null;
-    return workoutData.id || workoutData.workout_id || null;
-  };
-
   // Helper function to check if activity has a video
   const hasVideo = (activityData) => {
     if (!activityData) return false;
@@ -191,65 +196,6 @@ const WorkoutDetailsScreen = () => {
     return [];
   };
 
-  // Fetch day-specific status to determine completion state
-  const fetchWorkoutStatus = async (day = null) => {
-    try {
-      const workoutId = getWorkoutId(workout);
-      if (!workoutId) {
-        return;
-      }
-
-      const userToken = await AsyncStorage.getItem('userToken');
-      if (!userToken) {
-        return;
-      }
-
-      let authHeader = userToken;
-      if (!userToken.startsWith('Bearer ')) {
-        authHeader = `Bearer ${userToken}`;
-      }
-
-      // Use the selected day or the provided day
-      const dayToCheck = day || selectedDay;
-      const dayNumber = getDayNumber(dayToCheck);
-
-      // Use day-specific endpoint
-      const statusUrl = `${API_BASE_URL}/mobile/member-workouts/${workoutId}/day/${dayNumber}/activities`;
-
-      const response = await fetch(statusUrl, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': authHeader,
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        
-        // Extract day_status from response (backend provides this directly)
-        let status = 'pending';
-        if (data.day_status) {
-          const apiStatus = data.day_status.toLowerCase();
-          if (apiStatus === 'completed' || apiStatus === 'done' || apiStatus === 'finished') {
-            status = 'completed';
-          } else if (apiStatus === 'not_started' || apiStatus === 'pending' || apiStatus === 'in_progress') {
-            status = 'pending';
-          }
-        }
-
-        // Update day-specific status map
-        setDayStatusMap(prev => ({
-          ...prev,
-          [dayToCheck]: status
-        }));
-      }
-    } catch (error) {
-      // Error fetching workout status
-    }
-  };
-
   const enrichPlanActivities = async (activities) => {
     if (!activities || activities.length === 0) return [];
     return Promise.all(
@@ -291,139 +237,118 @@ const WorkoutDetailsScreen = () => {
     );
   };
 
-  const fetchWorkoutActivities = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      
-      // Check if we have a workout ID (handles both 'id' and 'workout_id')
-      const workoutId = getWorkoutId(workout);
-      if (!workoutId) {
-        setError('Workout ID is required');
-        setLoading(false);
-        return null;
+  const embeddedWorkoutDays = useMemo(() => {
+    if (workout?.days && Array.isArray(workout.days) && workout.days.length > 0) {
+      return workout.days;
+    }
+    if (workout?.workout_days && Array.isArray(workout.workout_days) && workout.workout_days.length > 0) {
+      return workout.workout_days;
+    }
+    return [];
+  }, [workout]);
+
+  const {
+    data: plansData,
+    isLoading: isPlansLoading,
+    error: plansError,
+    refetch: refetchPlans,
+    isError: isPlansError,
+  } = useQuery({
+    queryKey: workoutKeys.activityPlans(workoutId, memberId),
+    queryFn: () => fetchWorkoutActivityPlansByWorkoutId(workoutId),
+    enabled: !!workoutId && !!memberId,
+    staleTime: 2 * 60 * 1000,
+    gcTime: 10 * 60 * 1000,
+  });
+
+  const workoutPlanDays = useMemo(() => {
+    if (plansData?.days?.length) return plansData.days;
+    if (isPlansError || !plansData) return embeddedWorkoutDays;
+    return [];
+  }, [plansData, isPlansError, embeddedWorkoutDays]);
+
+  const availableDays = useMemo(() => {
+    const days = (workoutPlanDays || []).map((d) => d.day).filter(Boolean);
+    return days.length > 0 ? days : ['Monday'];
+  }, [workoutPlanDays]);
+
+  // Keep selectedDay valid when plan days load
+  useEffect(() => {
+    if (availableDays.length === 0) return;
+    if (!availableDays.includes(selectedDay)) {
+      setSelectedDay(availableDays[0]);
+    }
+  }, [availableDays, selectedDay]);
+
+  const dayStatusQueries = useQueries({
+    queries: availableDays.map((day) => {
+      const dayNumber = getDayNumber(day);
+      return {
+        queryKey: workoutKeys.dayStatus(workoutId, dayNumber, memberId),
+        queryFn: () => fetchMemberWorkoutDayStatus(workoutId, dayNumber),
+        enabled: !!workoutId && !!memberId && !!day,
+        staleTime: 20 * 1000,
+        gcTime: 5 * 60 * 1000,
+      };
+    }),
+  });
+
+  const dayStatusMap = useMemo(() => {
+    const map = {};
+    availableDays.forEach((day, index) => {
+      const payload = dayStatusQueries[index]?.data;
+      if (payload) {
+        map[day] = parseMemberDayStatus(payload);
       }
+    });
+    return map;
+  }, [availableDays, dayStatusQueries]);
 
-      const userToken = await AsyncStorage.getItem('userToken');
-      if (!userToken) {
-        setError('Authentication required');
-        setLoading(false);
-        return null;
-      }
+  const refetchDayStatuses = useCallback(async () => {
+    await Promise.all(dayStatusQueries.map((q) => q.refetch()));
+  }, [dayStatusQueries]);
 
-      let authHeader = userToken;
-      if (!userToken.startsWith('Bearer ')) {
-        authHeader = `Bearer ${userToken}`;
-      }
+  // Enrich activities for the selected day from cached plan days
+  useEffect(() => {
+    if (!availableDays.includes(selectedDay)) return;
 
-      // Always load from workout activity plans API so CRM/coach sets/reps/weight are fresh
-      const endpoint = `${API_BASE_URL}/mobile/workout-activities/workout/${workoutId}`;
-      const response = await fetch(endpoint, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Authorization': authHeader,
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-          'Pragma': 'no-cache',
-        },
-        cache: 'no-store',
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        const daysData = data?.data?.days || data?.days || [];
-
-          if (Array.isArray(daysData) && daysData.length > 0) {
-          setWorkoutPlanDays(daysData);
-          const days = daysData.map((d) => d.day).filter(Boolean);
-          const finalDays = days.length > 0 ? days : ['Monday'];
-          const activeDay = finalDays.includes(selectedDay) ? selectedDay : finalDays[0];
-          if (activeDay !== selectedDay) {
-            setSelectedDay(activeDay);
-          }
-
-          const dayData = daysData.find((d) => d.day === activeDay) || daysData[0];
-          const activities = getDayPlanActivities(dayData);
-          const enriched = await enrichPlanActivities(activities);
+    const gen = ++enrichGenRef.current;
+    const applyDay = async () => {
+      setEnriching(true);
+      try {
+        const dayData = (workoutPlanDays || []).find((d) => d.day === selectedDay);
+        const activities = getDayPlanActivities(dayData);
+        const enriched = await enrichPlanActivities(activities);
+        if (enrichGenRef.current === gen) {
           setWorkoutActivities(enriched);
-          setAvailableDays(finalDays);
-          setLoading(false);
-          return data;
+        }
+      } finally {
+        if (enrichGenRef.current === gen) {
+          setEnriching(false);
         }
       }
+    };
 
-      // Fallback: embedded workout object (list payload)
-      let workoutDays = null;
-      if (workout.days && Array.isArray(workout.days) && workout.days.length > 0) {
-        workoutDays = workout.days;
-      } else if (workout.workout_days && Array.isArray(workout.workout_days) && workout.workout_days.length > 0) {
-        workoutDays = workout.workout_days;
-      }
+    applyDay();
+    // enrichPlanActivities is stable enough for this screen; avoid refetch loops
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDay, workoutPlanDays, availableDays]);
 
-      if (workoutDays) {
-        setWorkoutPlanDays(workoutDays);
-        const days = workoutDays.map(day => day.day);
-        let activities = [];
-        if (!days.includes(selectedDay)) {
-          const firstAvailableDay = days[0];
-          setSelectedDay(firstAvailableDay);
-          activities = getDayPlanActivities(workoutDays.find((d) => d.day === firstAvailableDay));
-        } else {
-          activities = getDayPlanActivities(workoutDays.find((d) => d.day === selectedDay));
-        }
-
-        const enrichedActivities = await enrichPlanActivities(activities);
-        setWorkoutActivities(enrichedActivities);
-        setAvailableDays(days.length > 0 ? days : ['Monday']);
-        setLoading(false);
-        return workout;
-      }
-
-      setWorkoutPlanDays([]);
-      setWorkoutActivities([]);
-      setAvailableDays(['Monday']);
-      setLoading(false);
-      return null;
-    } catch (error) {
-      setError('Network error occurred');
-      return null;
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchWorkoutActivities();
-  }, []);
-
-  // Fetch status for all available days when they're loaded (to show completion in day buttons)
-  useEffect(() => {
-    if (availableDays.length > 0) {
-      // Fetch status for all available days to show completion indicators
-      const uniqueDays = [...new Set(availableDays)];
-      uniqueDays.forEach(day => {
-        fetchWorkoutStatus(day);
-      });
-    }
-  }, [availableDays.length > 0 ? availableDays.join(',') : '']);
-
-  // Refresh workout status when screen comes into focus (e.g., returning from WorkoutSession)
+  // Focus: refresh mutable day status only (plans stay cached unless stale/invalidated)
   useFocusEffect(
     React.useCallback(() => {
-      // Fetch status for all available days to update completion indicators
-      if (availableDays.length > 0) {
-        const uniqueDays = [...new Set(availableDays)];
-        uniqueDays.forEach(day => {
-          fetchWorkoutStatus(day);
+      if (!workoutId || !memberId || availableDays.length === 0) return;
+      availableDays.forEach((day) => {
+        queryClient.invalidateQueries({
+          queryKey: workoutKeys.dayStatus(workoutId, getDayNumber(day), memberId),
         });
-      }
-    }, [workout?.id || workout?.workout_id, availableDays.length > 0 ? availableDays.join(',') : ''])
+      });
+    }, [workoutId, memberId, availableDays, queryClient])
   );
 
   // Keep cards in sync when sets are saved from editor (backend + local)
   useEffect(() => {
-    return onWorkoutPlanUpdated(({ activity: updated }) => {
+    return onWorkoutPlanUpdated(({ activity: updated, workoutId: eventWorkoutId }) => {
       if (!updated) return;
       const updatedId = updated.id || updated.activity_id || updated.plan_id;
       setWorkoutActivities((prev) =>
@@ -440,26 +365,34 @@ const WorkoutDetailsScreen = () => {
           };
         })
       );
+      const planWorkoutId = eventWorkoutId || workoutId;
+      if (planWorkoutId && memberId) {
+        queryClient.invalidateQueries({
+          queryKey: workoutKeys.activityPlans(planWorkoutId, memberId),
+        });
+      }
     });
-  }, []);
+  }, [queryClient, workoutId, memberId]);
 
-  // Update activities when selected day changes — use fresh plan days, not stale route workout
-  useEffect(() => {
-    if (!availableDays.includes(selectedDay)) return;
+  // Full-screen loader only when nothing usable is on screen yet
+  const loading =
+    (!!workoutId && !memberId) ||
+    ((isPlansLoading || enriching) && workoutActivities.length === 0);
+  const error = !workoutId
+    ? 'Workout ID is required'
+    : isPlansError && embeddedWorkoutDays.length === 0
+      ? (plansError?.message || 'Network error occurred')
+      : null;
 
-    const applyDay = async () => {
-      const sourceDays = workoutPlanDays.length > 0
-        ? workoutPlanDays
-        : (workout?.days || workout?.workout_days || []);
-      const dayData = (sourceDays || []).find((d) => d.day === selectedDay);
-      const activities = getDayPlanActivities(dayData);
-      const enriched = await enrichPlanActivities(activities);
-      setWorkoutActivities(enriched);
-      fetchWorkoutStatus(selectedDay);
-    };
-
-    applyDay();
-  }, [selectedDay, workoutPlanDays]);
+  const fetchWorkoutActivities = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await refetchPlans();
+      await refetchDayStatuses();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refetchPlans, refetchDayStatuses]);
 
   const handleDayChange = (day) => {
     setSelectedDay(day);
@@ -496,14 +429,14 @@ const WorkoutDetailsScreen = () => {
 
   const handleEditMyWorkout = () => {
     closeWorkoutOptions();
-    const workoutId = workout?.id || workout?.workout_id;
-    if (!workoutId) return;
-    navigation.navigate('CreateWorkout', { editWorkoutId: workoutId, workout });
+    const editId = workout?.id || workout?.workout_id;
+    if (!editId) return;
+    navigation.navigate('CreateWorkout', { editWorkoutId: editId, workout });
   };
 
   const handleDeleteMyWorkout = () => {
-    const workoutId = workout?.id || workout?.workout_id;
-    if (!workoutId) {
+    const deleteId = workout?.id || workout?.workout_id;
+    if (!deleteId) {
       closeWorkoutOptions();
       return;
     }
@@ -517,10 +450,19 @@ const WorkoutDetailsScreen = () => {
           text: 'Delete',
           onPress: async () => {
             setAlertVisible(false);
-            setDeletingWorkoutId(workoutId);
+            setDeletingWorkoutId(deleteId);
             try {
-              await deleteMemberWorkout(workoutId);
+              await deleteMemberWorkout(deleteId);
               queryClient.invalidateQueries({ queryKey: workoutKeys.myWorkouts() });
+              queryClient.invalidateQueries({ queryKey: workoutKeys.allWorkouts() });
+              if (memberId) {
+                queryClient.invalidateQueries({
+                  queryKey: workoutKeys.activityPlans(deleteId, memberId),
+                });
+                queryClient.invalidateQueries({
+                  queryKey: [...workoutKeys.all, 'dayStatus', memberId, deleteId],
+                });
+              }
               closeWorkoutOptions();
               navigation.goBack();
             } catch (err) {
@@ -921,7 +863,7 @@ const WorkoutDetailsScreen = () => {
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={loading}
+            refreshing={refreshing}
             onRefresh={fetchWorkoutActivities}
             colors={['#222']}
             tintColor="#222"
