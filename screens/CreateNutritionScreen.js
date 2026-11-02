@@ -321,6 +321,15 @@ const CreateNutritionScreen = () => {
     useCallback(() => {
       const selectedFoods = route.params?.selectedFoods;
       const nutritionType = route.params?.nutritionType;
+      const appendSelectedFoods = route.params?.appendSelectedFoods === true;
+      const isEditMode = route.params?.editMode === true;
+
+      // Barcode → existing plan: edit-mode effect loads plan foods + appends scan.
+      // Do NOT replace meal-slot foods here or only the scanned item remains.
+      if (appendSelectedFoods && isEditMode) {
+        console.log('[CreateNutritionScreen] Skipping FoodScreen replace; edit-mode append owns this');
+        return;
+      }
       
       // Allow empty arrays to clear foods for a meal type
       if (selectedFoods !== undefined && Array.isArray(selectedFoods) && nutritionType) {
@@ -347,6 +356,7 @@ const CreateNutritionScreen = () => {
         
         console.log('[CreateNutritionScreen] ====== PROCESSING FOODS UPDATE ======');
         console.log('[CreateNutritionScreen] Nutrition Type:', nutritionType);
+        console.log('[CreateNutritionScreen] Append mode:', appendSelectedFoods);
         console.log('[CreateNutritionScreen] Source: persistentTableRows =', !!persistentTableRows, 
           'ref =', !!tableRowsStateRef.current, 'state =', !!tableRows);
         console.log('[CreateNutritionScreen] Current rows count:', currentRows.length);
@@ -354,21 +364,41 @@ const CreateNutritionScreen = () => {
         // Create a completely new array - CRITICAL for React to detect the change
         const newTableRows = [];
         
-        // STEP 1: Copy ALL existing rows EXCEPT the ones for the nutrition type being updated
-        // Use the ref state which is guaranteed to be the latest COMMITTED state
-        currentRows.forEach(row => {
-          if (row.nutrition_type !== nutritionType || !row.food_id || !row.food_name) {
-            // Preserve rows from other meal types or empty rows
+        if (appendSelectedFoods) {
+          // Keep ALL existing foods (including same meal type), then append new ones
+          currentRows.forEach(row => {
             newTableRows.push({
               ...row,
               food_data: row.food_data ? { ...row.food_data } : null,
             });
-            console.log(`[CreateNutritionScreen] ✓ Preserved food: ${row.food_name || 'empty'} for ${row.nutrition_type}`);
-          }
-        });
+          });
+        } else {
+          // FoodScreen replace: keep other meal types, replace this meal type
+          currentRows.forEach(row => {
+            if (row.nutrition_type !== nutritionType || !row.food_id || !row.food_name) {
+              newTableRows.push({
+                ...row,
+                food_data: row.food_data ? { ...row.food_data } : null,
+              });
+              console.log(`[CreateNutritionScreen] ✓ Preserved food: ${row.food_name || 'empty'} for ${row.nutrition_type}`);
+            }
+          });
+        }
+
+        const existingIds = new Set(
+          newTableRows
+            .filter((row) => row.nutrition_type === nutritionType)
+            .map((row) => String(row.food_id))
+        );
         
         // STEP 2: Add new rows for the selected nutrition type
-        const newRows = selectedFoods.map((food, index) => {
+        const newRows = selectedFoods
+          .filter((food) => {
+            if (!appendSelectedFoods) return true;
+            const id = String(food.id || food.food_id || '');
+            return id && !existingIds.has(id);
+          })
+          .map((food, index) => {
           // Get default serving in grams (default to 100g if not specified)
           const defaultServing = food.serving_size_g || food.serving_grams || 
             (food.serving_size && typeof food.serving_size === 'number' ? food.serving_size : 100);
@@ -418,17 +448,29 @@ const CreateNutritionScreen = () => {
         };
         
         // Clear the params to prevent re-processing
-        navigation.setParams({ selectedFoods: undefined, nutritionType: undefined });
+        navigation.setParams({
+          selectedFoods: undefined,
+          nutritionType: undefined,
+          appendSelectedFoods: undefined,
+        });
         
         // Reset the ref after a delay so new selections can be processed
         setTimeout(() => {
           lastProcessedRef.current = { nutritionType: null, foods: null };
         }, 1000);
+      } else if (selectedFoods === undefined && nutritionType === undefined) {
+        // Only reset when both cleared — don't wipe after edit-mode append skip
       } else {
         // Reset ref when params are undefined
         lastProcessedRef.current = { nutritionType: null, foods: null };
       }
-    }, [route.params?.selectedFoods, route.params?.nutritionType, navigation])
+    }, [
+      route.params?.selectedFoods,
+      route.params?.nutritionType,
+      route.params?.appendSelectedFoods,
+      route.params?.editMode,
+      navigation,
+    ])
   );
 
   // Helper function to reset form and clear persistent state
@@ -677,8 +719,9 @@ const CreateNutritionScreen = () => {
       
       // Load food items from template details
       const details = template.details || nutritionData.details || [];
+      let rows = [];
       if (details.length > 0) {
-        const rows = details.map((detail, index) => {
+        rows = details.map((detail, index) => {
           const food = detail.food || {};
           const servingGrams = detail.serving_grams || 100;
           
@@ -699,8 +742,71 @@ const CreateNutritionScreen = () => {
             food_data: food,
           };
         });
-        setTableRows(rows);
       }
+
+      // Barcode / external add: append selected foods into chosen meal slot
+      const pendingFoods = route.params?.selectedFoods;
+      const pendingType = route.params?.nutritionType;
+      if (Array.isArray(pendingFoods) && pendingFoods.length > 0 && pendingType) {
+        const existingIds = new Set(
+          rows
+            .filter((row) => row.nutrition_type === pendingType)
+            .map((row) => String(row.food_id))
+        );
+        const extras = pendingFoods
+          .filter((food) => {
+            const id = String(food.id || food.food_id || '');
+            return id && !existingIds.has(id);
+          })
+          .map((food, index) => {
+            const defaultServing =
+              food.serving_size_g ||
+              food.serving_grams ||
+              (food.serving_size && typeof food.serving_size === 'number'
+                ? food.serving_size
+                : 100);
+            return {
+              id: Date.now() + Math.random() + index,
+              nutrition_type: pendingType,
+              food_id: food.id || food.food_id,
+              food_name: food.name || food.food_name,
+              serving_grams: String(defaultServing),
+              base_serving_grams: defaultServing,
+              base_protein: parseFloat(food.protein || food.protein_g || 0),
+              base_carbs: parseFloat(food.carbs || food.carbohydrates || 0),
+              base_fiber: parseFloat(food.fiber || food.fiber_g || 0),
+              base_fat: parseFloat(food.fats || food.fat || 0),
+              base_sodium: parseFloat(food.sodium || food.sodium_mg || 0),
+              base_potassium: parseFloat(food.potassium || food.potassium_mg || 0),
+              base_kcal: parseFloat(food.calories || food.kcal || 0),
+              food_data: food ? { ...food } : null,
+            };
+          });
+        rows = [...rows, ...extras];
+        const foodsSignature = JSON.stringify(
+          pendingFoods.map((f) => f.id || f.food_id).sort()
+        );
+        lastProcessedRef.current = {
+          nutritionType: pendingType,
+          foods: foodsSignature,
+        };
+        navigation.setParams({
+          selectedFoods: undefined,
+          nutritionType: undefined,
+          appendSelectedFoods: undefined,
+        });
+      }
+
+      // Always commit loaded plan rows (existing + optional scanned append)
+      persistentTableRows = rows;
+      tableRowsStateRef.current = rows;
+      setTableRows(rows);
+      console.log(
+        '[CreateNutritionScreen] Loaded edit plan rows:',
+        rows.length,
+        'pending append:',
+        Array.isArray(pendingFoods) ? pendingFoods.length : 0
+      );
     } else {
       // ONLY reset to create mode if we explicitly don't have edit params
       // AND nutritionId wasn't locked (preserve edit identity)

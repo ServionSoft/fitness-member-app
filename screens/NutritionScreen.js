@@ -275,6 +275,16 @@ const NutritionScreen = () => {
   const API_BASE_URL = ENV_API_BASE_URL;
   const BASE_URL = API_BASE_URL.replace('/api', ''); // For image URLs
   
+  // Newest / most recently updated nutrition first (leftmost in horizontal lists)
+  const sortNutritionsNewestFirst = (items = []) => {
+    return [...items].sort((a, b) => {
+      const timeA = Date.parse(a?.updated_at || a?.created_at || a?.date || a?.start_date || '') || 0;
+      const timeB = Date.parse(b?.updated_at || b?.created_at || b?.date || b?.start_date || '') || 0;
+      if (timeB !== timeA) return timeB - timeA;
+      return (b?.id || 0) - (a?.id || 0);
+    });
+  };
+
   const fetchNutritionPlans = async (forceRefresh = false) => {
     try {
       const cacheKey = 'nutrition_plans';
@@ -287,8 +297,9 @@ const NutritionScreen = () => {
         // Try to load from cache first
         const cachedData = await DataCache.get(cacheKey);
         if (cachedData && cachedData.length > 0) {
-          setNutritionPlans(cachedData);
-          setFilteredNutritionPlans(cachedData);
+          const sortedCached = sortNutritionsNewestFirst(cachedData);
+          setNutritionPlans(sortedCached);
+          setFilteredNutritionPlans(sortedCached);
           setLoading(false);
         } else {
           setLoading(true);
@@ -344,7 +355,7 @@ const NutritionScreen = () => {
   
       if (response.ok) {
         const data = await response.json();
-        const plans = data.data || [];
+        const plans = sortNutritionsNewestFirst(data.data || []);
         setNutritionPlans(plans);
         setFilteredNutritionPlans(plans);
         
@@ -380,7 +391,7 @@ const NutritionScreen = () => {
         // Try to load from cache first
         const cachedData = await DataCache.get(cacheKey);
         if (cachedData && cachedData.length > 0) {
-          setAssignedMeals(cachedData);
+          setAssignedMeals(sortNutritionsNewestFirst(cachedData));
           setLoadingAssignedMeals(false);
           return;
         } else {
@@ -413,7 +424,7 @@ const NutritionScreen = () => {
   
       if (response.ok) {
         const data = await response.json();
-        const meals = data.data || data || [];
+        const meals = sortNutritionsNewestFirst(data.data || data || []);
         setAssignedMeals(meals);
         
         // Cache the data
@@ -623,6 +634,13 @@ const NutritionScreen = () => {
               editable={false}
             />
           </View>
+          <TouchableOpacity
+            style={styles.barcodeButton}
+            onPress={() => navigation.navigate('BarcodeScanner')}
+            activeOpacity={0.7}
+          >
+            <MaterialCommunityIcons name="barcode-scan" size={22} color="#1a1a1a" />
+          </TouchableOpacity>
           <TouchableOpacity 
             style={styles.menuButton}
             onPress={() => setMenuVisible(true)}
@@ -661,6 +679,13 @@ const NutritionScreen = () => {
               editable={false}
             />
           </View>
+          <TouchableOpacity
+            style={styles.barcodeButton}
+            onPress={() => navigation.navigate('BarcodeScanner')}
+            activeOpacity={0.7}
+          >
+            <MaterialCommunityIcons name="barcode-scan" size={22} color="#1a1a1a" />
+          </TouchableOpacity>
           <TouchableOpacity 
             style={styles.menuButton}
             onPress={() => setMenuVisible(true)}
@@ -714,6 +739,13 @@ const NutritionScreen = () => {
               placeholderTextColor="#bbb"
             />
           </View>
+          <TouchableOpacity
+            style={styles.barcodeButton}
+            onPress={() => navigation.navigate('BarcodeScanner')}
+            activeOpacity={0.7}
+          >
+            <MaterialCommunityIcons name="barcode-scan" size={22} color="#1a1a1a" />
+          </TouchableOpacity>
           <TouchableOpacity 
             style={styles.menuButton}
             onPress={() => setMenuVisible(true)}
@@ -774,6 +806,13 @@ const NutritionScreen = () => {
             placeholderTextColor="#bbb"
           />
         </View>
+        <TouchableOpacity
+          style={styles.barcodeButton}
+          onPress={() => navigation.navigate('BarcodeScanner')}
+          activeOpacity={0.7}
+        >
+          <MaterialCommunityIcons name="barcode-scan" size={22} color="#1a1a1a" />
+        </TouchableOpacity>
         <TouchableOpacity 
           style={styles.menuButton}
           onPress={() => setMenuVisible(true)}
@@ -1137,8 +1176,12 @@ const styles = StyleSheet.create({
     marginRight: 12,
     padding: 8,
   },
+  barcodeButton: {
+    marginLeft: 8,
+    padding: 8,
+  },
   menuButton: {
-    marginLeft: 12,
+    marginLeft: 4,
     padding: 8,
   },
   searchBarContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', borderRadius: 16, flex: 1, height: 40, elevation: 2 },
